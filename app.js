@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-18.1";
+const APP_VERSION = "2026-09-18.2";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -55,6 +55,7 @@ const $ = (id) => document.getElementById(id);
 const el = {};
 [
   "main","errBox","result","histWrap","status","mic","lvl","meter",
+  "textIn","textSend",
   "openUsage","openSettings",
   "mToday","mLeft","mCost","mBar",
   "settings","saveSettings","shareBtn","apiKey","model","dialect",
@@ -184,14 +185,55 @@ function refreshUsageDialog(){
 
 /* ---------------- prompt ---------------- */
 
-function systemInstruction(){
-  return [
+function systemInstruction(kind){
+  const spoken = kind !== "text";
+  const head = [
     "You are a live two-way interpreter between Korean and Spanish.",
-    "You are NOT an assistant. Never answer, comment on, explain or react to what is said. Only interpret.",
+    "You are NOT an assistant. Never answer, comment on, explain or react to the content. Only interpret.",
     "",
-    "Detect the language actually spoken:",
+    "Detect the language of the input:",
     "- Korean -> translate into " + settings.dialect + ".",
-    "- Spanish or any other language -> translate into natural spoken Korean.",
+    "- Spanish or any other language -> translate into natural spoken Korean."
+  ];
+
+  const tail = [
+    "",
+    "STUDY BREAKDOWN",
+    "The user is a Korean speaker learning Spanish. After the translation, break the SPANISH",
+    "side of this exchange into the pieces worth memorising — whichever side the Spanish is on.",
+    "- 2 to 6 items. Fewer is fine for a short sentence.",
+    "- Each item is a word or a short chunk that works as a unit: a verb phrase, a set expression,",
+    "  a noun with its article, a question opener. Prefer useful chunks over single words.",
+    "- Give the plain dictionary-style Korean meaning, not a re-translation of the whole sentence.",
+    "- Skip bare function words (el, la, de, y, que) unless they are part of a chunk.",
+    "- Order them as they appear in the Spanish.",
+    "- One per line, exactly: spanish :: korean",
+    "",
+    "Answer in EXACTLY this order and nothing else:",
+    "<<<LANG>>>ko or es",
+    "<<<DST>>>the translation",
+    "<<<SRC>>>the tidied sentence in the language that was given",
+    "<<<STUDY>>>",
+    "spanish :: korean",
+    "spanish :: korean"
+  ];
+
+  if (!spoken){
+    return head.concat([
+      "",
+      "THIS INPUT WAS TYPED OR PASTED, NOT SPOKEN.",
+      "It is already deliberate, so translate it faithfully. Do not rewrite, shorten, soften or",
+      "'improve' it. Keep line breaks where they carry meaning. Fix nothing except obvious typos.",
+      "Slang, abbreviations and emoji are normal in messages: read them as a native would.",
+      "If it is a message from someone else, keep their tone — blunt stays blunt, polite stays polite.",
+      "",
+      "Translate meaning, not words. Keep names, numbers, prices and times exact.",
+      "Never add greetings, notes, apologies, romanization or alternative translations.",
+      "If the text is empty, put UNCLEAR after <<<DST>>> and stop."
+    ]).concat(tail).join("\n");
+  }
+
+  return head.concat([
     "",
     "HOW THE SPEAKER TALKS",
     "This person is thinking out loud, live and unrehearsed. Expect heavy disfluency:",
@@ -228,13 +270,8 @@ function systemInstruction(){
     "If the speaker genuinely said several separate things, use several short sentences.",
     "Never mention that you cleaned anything up. Never note that the speech was unclear or hesitant.",
     "Never add greetings, notes, apologies, romanization or alternative translations.",
-    "If the recording is empty or truly unintelligible, put UNCLEAR after <<<DST>>> and stop.",
-    "",
-    "Answer in EXACTLY this order and nothing else:",
-    "<<<LANG>>>ko or es",
-    "<<<DST>>>the translation",
-    "<<<SRC>>>the tidied sentence in the language that was spoken"
-  ].join("\n");
+    "If the recording is empty or truly unintelligible, put UNCLEAR after <<<DST>>> and stop."
+  ]).concat(tail).join("\n");
 }
 
 /* Parse whatever has arrived so far; safe to call on partial text. */
@@ -242,27 +279,46 @@ function partialParse(acc){
   const lang = /<<<LANG>>>\s*([a-z]+)/i.exec(acc);
   const dstAt = acc.indexOf("<<<DST>>>");
   const srcAt = acc.indexOf("<<<SRC>>>");
-  let dst = "", src = "";
-  if (dstAt >= 0) dst = acc.slice(dstAt + 9, srcAt >= 0 ? srcAt : undefined);
-  if (srcAt >= 0) src = acc.slice(srcAt + 9);
+  const stAt = acc.indexOf("<<<STUDY>>>");
+  let dst = "", src = "", studyRaw = "";
+
+  const endOfDst = srcAt >= 0 ? srcAt : (stAt >= 0 ? stAt : undefined);
+  if (dstAt >= 0) dst = acc.slice(dstAt + 9, endOfDst);
+  if (srcAt >= 0) src = acc.slice(srcAt + 9, stAt >= 0 ? stAt : undefined);
+  if (stAt >= 0) studyRaw = acc.slice(stAt + 11);
+
+  const study = [];
+  for (const line of studyRaw.split("\n")){
+    const i = line.indexOf("::");
+    if (i < 0) continue;
+    const es = line.slice(0, i).trim().replace(/^[-*\d.\s]+/, "");
+    const ko = line.slice(i + 2).trim();
+    if (es && ko) study.push({ es: es, ko: ko });
+  }
+
   return {
     lang: lang ? lang[1].toLowerCase() : "",
     dst: dst.trim(),
     src: src.trim(),
-    dstDone: srcAt >= 0
+    study: study,
+    dstDone: srcAt >= 0 || stAt >= 0
   };
 }
 
 /* ---------------- API ---------------- */
 
-function buildBody(base64, mimeType, model, stream){
+/* src is either {kind:"audio", data, mime} or {kind:"text", text} */
+function buildBody(src, model, stream){
+  const input = (src.kind === "text")
+    ? [{ type: "text", text: "Interpret this text. Reply only in the required format.\n\n---\n" + src.text + "\n---" }]
+    : [
+        { type: "text", text: "Interpret this audio. Reply only in the required format." },
+        { type: "audio", data: src.data, mime_type: src.mime }
+      ];
   return {
     model: model,
-    system_instruction: systemInstruction(),
-    input: [
-      { type: "text", text: "Interpret this audio. Reply only in the required format." },
-      { type: "audio", data: base64, mime_type: mimeType }
-    ],
+    system_instruction: systemInstruction(src.kind),
+    input: input,
     generation_config: {
       temperature: 0.2,
       // untangling false starts and self-corrections is reasoning work,
@@ -338,11 +394,11 @@ function deltaText(ev){
   return "";
 }
 
-async function callStreaming(base64, mime, model, onPartial){
+async function callStreaming(src, model, onPartial){
   const res = await fetch(API_URL, {
     method: "POST",
     headers: { "x-goog-api-key": settings.apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify(buildBody(base64, mime, model, true))
+    body: JSON.stringify(buildBody(src, model, true))
   });
 
   if (!res.ok){
@@ -377,11 +433,11 @@ async function callStreaming(base64, mime, model, onPartial){
   return acc ? { text: acc, usage: usage } : null;
 }
 
-async function callBlocking(base64, mime, model){
+async function callBlocking(src, model){
   const res = await fetch(API_URL, {
     method: "POST",
     headers: { "x-goog-api-key": settings.apiKey, "Content-Type": "application/json" },
-    body: JSON.stringify(buildBody(base64, mime, model, false))
+    body: JSON.stringify(buildBody(src, model, false))
   });
   const raw = await res.text();
   let json = null; try { json = JSON.parse(raw); } catch (e) {}
@@ -393,18 +449,18 @@ async function callBlocking(base64, mime, model){
   return { text: text, usage: readUsage(json) };
 }
 
-async function interpret(base64, mime, onPartial){
+async function interpret(src, onPartial){
   const model = settings.model;
   if (settings.stream){
     try {
-      const r = await callStreaming(base64, mime, model, onPartial);
+      const r = await callStreaming(src, model, onPartial);
       if (r) return Object.assign(r, { model: model });
     } catch (e) {
       // a real API error (bad key, quota, bad model) must surface, not silently retry
       if (/API \d{3}/.test(e.message)) throw e;
     }
   }
-  const r = await callBlocking(base64, mime, model);
+  const r = await callBlocking(src, model);
   return Object.assign(r, { model: model });
 }
 
@@ -561,19 +617,26 @@ async function onRecordingStopped(){
     return;
   }
 
+  const b64 = await blobToBase64(blob);
+  await runInterpret({ kind: "audio", data: b64, mime: mime }, durationMs);
+}
+
+/* Shared path for both spoken and typed input. */
+async function runInterpret(src, audioMs){
   busy = true;
+  showError("");
   el.mic.classList.remove("rec");
   el.mic.classList.add("busy");
   el.mic.textContent = "…";
   el.mic.disabled = true;
+  el.textSend.disabled = true;
   setStatus("번역 중…");
 
   const t0 = Date.now();
   let firstTextAt = 0;
 
   try {
-    const b64 = await blobToBase64(blob);
-    const out = await interpret(b64, mime, (acc) => {
+    const out = await interpret(src, (acc) => {
       if (!firstTextAt) firstTextAt = Date.now();
       const p = partialParse(acc);
       if (p.dst) renderLive(p);
@@ -583,28 +646,30 @@ async function onRecordingStopped(){
     if (!p.dst) throw new Error("형식을 알 수 없는 응답입니다.\n" + out.text.slice(0, 300));
 
     const elapsed = Date.now() - t0;
-    const audTok = Math.round((durationMs / 1000) * AUDIO_TOKENS_PER_SEC);
-    const inTok = (out.usage && out.usage.inTok) || (audTok + 260);
+    const audTok = audioMs ? Math.round((audioMs / 1000) * AUDIO_TOKENS_PER_SEC) : 0;
+    const inTok = (out.usage && out.usage.inTok) || (audTok + 320);
     const outTok = (out.usage && out.usage.outTok) || Math.round((p.dst.length + p.src.length) / 2.5);
     const cost = computeCost(out.model, inTok, outTok, audTok);
     addUsage(inTok, outTok, audTok, cost);
     refreshMeter();
 
     if (/^UNCLEAR$/i.test(p.dst)){
-      setStatus("잘 안 들렸습니다 — 다시 말해 주십시오");
+      setStatus(src.kind === "text" ? "번역할 내용을 알아보지 못했습니다" : "잘 안 들렸습니다 — 다시 말해 주십시오");
       el.result.innerHTML = "";
       renderHistoryOnly();
     } else {
       const lang = p.lang || guessLang(p.src);
       const entry = {
         at: new Date().toISOString(),
+        via: src.kind,
         from: lang,
         to: lang === "ko" ? "es" : "ko",
         src: p.src,
         dst: p.dst,
+        study: p.study,
         model: out.model,
         ms: elapsed,
-        audioMs: durationMs,
+        audioMs: audioMs || 0,
         inTok: inTok, outTok: outTok, cost: cost
       };
       appendLog(entry);
@@ -619,8 +684,21 @@ async function onRecordingStopped(){
   } finally {
     busy = false;
     resetMic();
+    el.textSend.disabled = false;
     if (reloadPending) setTimeout(flushPendingReload, 1500);
   }
+}
+
+async function translateTyped(){
+  if (busy || recording) return;
+  if (!settings.apiKey){ openSettings(); return; }
+  const text = el.textIn.value.trim();
+  if (!text) return;
+  if (text.length > 6000){ showError("글이 너무 깁니다. 6000자 이내로 나눠서 넣어주십시오."); return; }
+  el.textIn.blur();
+  await runInterpret({ kind: "text", text: text }, 0);
+  el.textIn.value = "";
+  autoGrow();
 }
 
 function guessLang(text){ return /[가-힣]/.test(text) ? "ko" : "es"; }
@@ -677,17 +755,58 @@ function render(entry){
   el.main.scrollTop = 0;
 }
 
+/* Whichever way the exchange went, the Spanish side is what gets studied. */
+function spanishOf(e){ return e.to === "es" ? e.dst : e.src; }
+function koreanOf(e){ return e.to === "es" ? e.src : e.dst; }
+
+let hideMeaning = jget("interp.hideMeaning", false);
+
 function renderHistoryOnly(){
-  const log = loadLog().slice(0, -1).slice(-30).reverse();
+  const log = loadLog().slice(0, -1).slice(-40).reverse();
   if (!log.length){ el.histWrap.innerHTML = ""; return; }
-  let html = '<div class="hist-title">지난 문장</div>';
-  for (const e of log){
-    html += '<div class="hist">' +
-      '<div class="h-dst ' + e.to + '">' + esc(e.dst) + '</div>' +
-      '<div class="h-src">' + esc(e.src) + '</div>' +
+
+  let html =
+    '<div class="study-head">' +
+      '<span class="hist-title">공부할 표현</span>' +
+      '<button class="mini" id="toggleMeaning">' + (hideMeaning ? "뜻 보이기" : "뜻 가리기") + '</button>' +
     '</div>';
+
+  for (let i = 0; i < log.length; i++){
+    const e = log[i];
+    const items = Array.isArray(e.study) ? e.study : [];
+    html += '<div class="scard">' +
+      '<div class="s-es">' + esc(spanishOf(e)) + '</div>' +
+      '<div class="s-ko' + (hideMeaning ? " masked" : "") + '">' + esc(koreanOf(e)) + '</div>';
+    if (items.length){
+      html += '<div class="chips">';
+      for (let j = 0; j < items.length; j++){
+        html += '<button class="chip-item" data-say="' + esc(items[j].es) + '">' +
+            '<span class="c-es">' + esc(items[j].es) + '</span>' +
+            '<span class="c-ko' + (hideMeaning ? " masked" : "") + '">' + esc(items[j].ko) + '</span>' +
+          '</button>';
+      }
+      html += '</div>';
+    }
+    html += '</div>';
   }
   el.histWrap.innerHTML = html;
+
+  const tog = $("toggleMeaning");
+  if (tog) tog.onclick = () => {
+    hideMeaning = !hideMeaning;
+    jset("interp.hideMeaning", hideMeaning);
+    renderHistoryOnly();
+  };
+  el.histWrap.querySelectorAll(".chip-item").forEach((b) => {
+    b.onclick = () => {
+      const ko = b.querySelector(".c-ko");
+      if (ko && ko.classList.contains("masked")) { ko.classList.remove("masked"); return; }
+      speak(b.getAttribute("data-say"), "es");
+    };
+  });
+  el.histWrap.querySelectorAll(".s-ko.masked").forEach((n) => {
+    n.onclick = () => n.classList.remove("masked");
+  });
 }
 
 function speak(text, lang){
@@ -822,6 +941,17 @@ el.resetUsage.onclick = () => {
 };
 
 el.mic.onclick = () => { if (busy) return; recording ? stopRecording() : startRecording(); };
+
+function autoGrow(){
+  el.textIn.style.height = "auto";
+  el.textIn.style.height = Math.min(120, el.textIn.scrollHeight) + "px";
+}
+el.textIn.addEventListener("input", autoGrow);
+el.textSend.onclick = translateTyped;
+el.textIn.addEventListener("keydown", (e) => {
+  // Enter sends; Shift+Enter makes a new line
+  if (e.key === "Enter" && !e.shiftKey && !e.isComposing){ e.preventDefault(); translateTyped(); }
+});
 
 document.addEventListener("keydown", (e) => {
   if (e.code === "Space" && e.target === document.body){ e.preventDefault(); el.mic.click(); }

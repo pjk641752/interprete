@@ -76,11 +76,41 @@
   .hint{color:var(--muted);font-size:13.5px;line-height:1.65;text-align:center;padding:30px 10px}
   .err{background:#2a1618;border:1px solid #5a2b2f;color:#ffc9c9;border-radius:12px;padding:12px 14px;font-size:13px;line-height:1.55;margin-bottom:11px;white-space:pre-wrap;word-break:break-word}
 
-  .hist-title{color:var(--dim);font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase;margin:20px 4px 8px}
-  .hist{border-top:1px solid var(--line);padding:10px 4px}
-  .hist .h-dst{font-size:15.5px;font-weight:600;line-height:1.42}
-  .hist .h-src{font-size:12.5px;color:var(--dim);margin-top:3px;line-height:1.42}
-  .hist .h-dst.es{color:var(--es)} .hist .h-dst.ko{color:var(--ko)}
+  /* study cards */
+  .study-head{display:flex;align-items:center;justify-content:space-between;margin:20px 2px 9px}
+  .hist-title{color:var(--dim);font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase}
+  .scard{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:9px}
+  .s-es{font-size:17px;font-weight:650;color:var(--es);line-height:1.4;word-break:break-word}
+  .s-ko{font-size:13px;color:var(--muted);margin-top:4px;line-height:1.45;word-break:break-word}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin-top:11px}
+  .chip-item{
+    display:flex;flex-direction:column;align-items:flex-start;gap:1px;
+    background:var(--surface-2);border:1px solid var(--line);border-radius:9px;
+    padding:6px 9px;cursor:pointer;font-family:inherit;text-align:left;
+  }
+  .chip-item:active{background:#252d37}
+  .c-es{font-size:13.5px;font-weight:650;color:var(--es)}
+  .c-ko{font-size:11.5px;color:var(--muted)}
+  .masked{
+    background:var(--surface-2);color:transparent;border-radius:5px;
+    user-select:none;cursor:pointer;box-shadow:inset 0 0 0 1px var(--line);
+  }
+
+  /* typed input */
+  .typebar{display:flex;gap:7px;width:100%;align-items:flex-end;margin-bottom:2px}
+  .typebar textarea{
+    flex:1;background:var(--surface);border:1px solid var(--line);color:var(--text);
+    border-radius:13px;padding:10px 12px;font-size:15px;font-family:inherit;
+    resize:none;line-height:1.4;max-height:120px;overflow-y:auto;
+  }
+  .typebar textarea::placeholder{color:var(--dim)}
+  .typebar textarea:focus{outline:none;border-color:#3d4a5a}
+  .typebar button{
+    flex:none;width:44px;height:42px;border-radius:12px;border:none;
+    background:var(--surface-2);color:var(--muted);font-size:18px;cursor:pointer;
+  }
+  .typebar button:active{background:#2f3944}
+  .typebar button:disabled{opacity:.4}
 
   footer{border-top:1px solid var(--line);background:var(--bg);padding:12px 14px calc(14px + env(safe-area-inset-bottom));display:flex;flex-direction:column;align-items:center;gap:9px}
   #status{font-size:12.5px;color:var(--muted);min-height:17px;font-weight:500;text-align:center}
@@ -148,6 +178,10 @@
 </main>
 
 <footer>
+  <div class="typebar">
+    <textarea id="textIn" rows="1" placeholder="받은 메시지를 붙여넣거나 글로 쓰십시오" spellcheck="false"></textarea>
+    <button id="textSend" type="button" aria-label="글 번역">↵</button>
+  </div>
   <div class="level"><i id="lvl"></i></div>
   <div id="status">준비됨 — 버튼을 누르고 말하십시오</div>
   <button id="mic" type="button" aria-label="녹음">🎙</button>
