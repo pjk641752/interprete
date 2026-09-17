@@ -130,8 +130,6 @@
 <header>
   <span class="brand">통역기</span>
   <span class="spacer"></span>
-  <button class="chip on" data-mode="fast" id="modeFast" type="button">빠름</button>
-  <button class="chip" data-mode="good" id="modeGood" type="button">정확</button>
   <button class="icon-btn" id="openUsage" type="button" aria-label="사용량">📊</button>
   <button class="icon-btn" id="openSettings" type="button" aria-label="설정">⚙</button>
 </header>
@@ -166,10 +164,12 @@
     <div class="note">키 발급: <b>aistudio.google.com/apikey</b></div>
 
     <h3>모델</h3>
-    <label for="mFast">빠름 모드</label>
-    <input type="text" id="mFast" spellcheck="false" autocapitalize="off">
-    <label for="mGood">정확 모드</label>
-    <input type="text" id="mGood" spellcheck="false" autocapitalize="off">
+    <label for="model">사용할 모델</label>
+    <input type="text" id="model" spellcheck="false" autocapitalize="off">
+    <div class="note">
+      기본값 <b>gemini-3.8-flash</b> 입니다. 더듬는 말의 의도를 풀어내는 데는 추론이 필요해서
+      가장 싼 모델 대신 이쪽을 씁니다.
+    </div>
 
     <h3>번역</h3>
     <label for="dialect">스페인어 지역</label>
@@ -179,20 +179,21 @@
       <option value="스페인 본토 스페인어">스페인 본토</option>
     </select>
     <div class="inline">
-      <input type="checkbox" id="tidy">
-      <span>더듬거나 반복한 말을 깔끔한 문장으로 정리</span>
-    </div>
-    <div class="inline">
       <input type="checkbox" id="autoSpeak">
       <span>번역 결과를 소리내어 읽기</span>
     </div>
 
-    <h3>속도</h3>
-    <label for="silence">말이 멈춘 뒤 자동 종료까지 (밀리초)</label>
-    <input type="number" id="silence" min="400" max="4000" step="100">
+    <h3>말 끊김</h3>
+    <label for="silence">말을 멈춘 뒤 기다리는 시간 (밀리초)</label>
+    <input type="number" id="silence" min="800" max="4000" step="100">
+    <div class="note">
+      길게 뜸을 들이며 말씀하시는 편이면 3000 정도로 올리십시오.
+      뜸을 들였다가 다시 말을 이으실 때마다 기다리는 시간이 자동으로 늘어나므로,
+      생각하다 끊기는 일은 거의 없습니다. 최대 4초까지 기다립니다.
+    </div>
     <div class="inline">
       <input type="checkbox" id="autoStop">
-      <span>자동 종료 사용</span>
+      <span>자동 종료 사용 (끄면 버튼을 다시 눌러야 끝납니다)</span>
     </div>
     <div class="inline">
       <input type="checkbox" id="stream">

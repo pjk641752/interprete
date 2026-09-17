@@ -1,7 +1,7 @@
 /* Interpreter PWA service worker.
    Caches only the app shell. API calls always go to the network. */
 
-const CACHE = "interp-shell-v3";
+const CACHE = "interp-shell-v4";
 const SHELL = [
   "./",
   "./index.html",
@@ -38,8 +38,10 @@ self.addEventListener("fetch", (e) => {
   // never touch the Gemini API or anything cross-origin
   if (url.origin !== self.location.origin) return;
 
-  // network-first for the page itself so updates land immediately
-  if (req.mode === "navigate" || url.pathname.endsWith("index.html")) {
+  // Network-first for code and config so a deploy lands on the next open.
+  // Cache is only the offline fallback. Images stay cache-first below.
+  const isCode = /\.(js|html|webmanifest|json)$/.test(url.pathname);
+  if (req.mode === "navigate" || isCode || url.pathname.endsWith("/")) {
     e.respondWith(
       fetch(req)
         .then((res) => {

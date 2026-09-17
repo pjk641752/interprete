@@ -28,32 +28,35 @@ const FALLBACK_PRICE = { in: 0.50, out: 3.00 };
 
 const DEFAULTS = {
   apiKey: "",
-  modelFast: "gemini-3.5-flash-lite",
-  modelGood: "gemini-3.8-flash",
+  model: "gemini-3.8-flash",
   dialect: "멕시코 구어체 스페인어",
-  tidy: true,
   autoSpeak: false,
   autoStop: true,
-  silenceMs: 900,
+  silenceMs: 2000,
   stream: true,
   freeLimit: 250,
-  fx: 18,
-  mode: "fast"
+  fx: 18
 };
 
 const SILENCE_RMS = 0.012;
 const MIN_SPEECH_MS = 350;
-const MAX_RECORD_MS = 30000;
+/* Total voiced time required before auto-stop may fire. Stops a stray
+   cough or a single "음..." from ending the recording. */
+const MIN_VOICED_MS = 900;
+/* Each time the speaker pauses and starts again, they get more patience. */
+const PAUSE_BONUS_MS = 450;
+const MAX_PAUSE_MS = 4000;
+const MAX_RECORD_MS = 60000;
 const AUDIO_BPS = 24000; // opus at 24 kbps: small upload, speech stays clear
 
 const $ = (id) => document.getElementById(id);
 const el = {};
 [
   "main","errBox","result","histWrap","status","mic","lvl","meter",
-  "modeFast","modeGood","openUsage","openSettings",
+  "openUsage","openSettings",
   "mToday","mLeft","mCost","mBar",
-  "settings","saveSettings","shareBtn","apiKey","mFast","mGood","dialect",
-  "tidy","autoSpeak","autoStop","silence","stream","freeLimit","fx",
+  "settings","saveSettings","shareBtn","apiKey","model","dialect",
+  "autoSpeak","autoStop","silence","stream","freeLimit","fx",
   "usage","closeUsage","exportBtn","resetUsage",
   "uMonthCost","uMonthPeso","uDayReq","uDayLeft","uDayIn","uDayOut","uDayCost",
   "uMonReq","uMonIn","uMonOut","uAvg","uPrices"
@@ -70,6 +73,15 @@ function jset(key, value){
 }
 
 let settings = Object.assign({}, DEFAULTS, jget("interp.settings", {}));
+
+/* Migrate from the old two-mode build (빠름/정확) to a single model. */
+(function migrate(){
+  if (!settings.model) settings.model = settings.modelGood || settings.modelFast || DEFAULTS.model;
+  if (settings.model === "gemini-3.5-flash-lite") settings.model = DEFAULTS.model;
+  if (settings.silenceMs && settings.silenceMs < 1500) settings.silenceMs = DEFAULTS.silenceMs;
+  delete settings.modelFast; delete settings.modelGood; delete settings.mode; delete settings.tidy;
+})();
+
 function persist(){ jset("interp.settings", settings); }
 
 function loadLog(){ return jget("interp.log", []); }
@@ -158,13 +170,11 @@ function refreshUsageDialog(){
     ? fmtUsd(u.month.cost / u.month.req) + " · " + fmtNum((u.month.inTok + u.month.outTok) / u.month.req) + "토큰"
     : "—";
 
-  const pf = priceFor(settings.modelFast), pg = priceFor(settings.modelGood);
+  const p = priceFor(settings.model);
   el.uPrices.innerHTML =
     "적용 중인 단가 (100만 토큰당)<br>" +
-    "빠름 " + settings.modelFast + " — 입력 $" + pf.in + " / 출력 $" + pf.out +
-      (pf.audio ? " / 음성 $" + pf.audio : "") + "<br>" +
-    "정확 " + settings.modelGood + " — 입력 $" + pg.in + " / 출력 $" + pg.out +
-      (pg.audio ? " / 음성 $" + pg.audio : "") + "<br><br>" +
+    settings.model + " — 입력 $" + p.in + " / 출력 $" + p.out +
+      (p.audio ? " / 음성 $" + p.audio : "") + "<br><br>" +
     "음성은 1초에 " + AUDIO_TOKENS_PER_SEC + "토큰으로 계산됩니다. " +
     "요금은 이 단가표로 추산한 값이며 구글의 실제 청구서와 다를 수 있습니다.";
 }
@@ -172,41 +182,56 @@ function refreshUsageDialog(){
 /* ---------------- prompt ---------------- */
 
 function systemInstruction(){
-  const lines = [
+  return [
     "You are a live two-way interpreter between Korean and Spanish.",
     "You are NOT an assistant. Never answer, comment on, explain or react to what is said. Only interpret.",
     "",
     "Detect the language actually spoken:",
     "- Korean -> translate into " + settings.dialect + ".",
-    "- Spanish or any other language -> translate into natural spoken Korean."
-  ];
-
-  if (settings.tidy){
-    lines.push(
-      "",
-      "The speaker is talking live and unrehearsed. Expect stutters, filler words, repeated words,",
-      "false starts, and mid-sentence self-corrections. Silently repair all of it:",
-      "- Work out what the speaker was driving at and render it as one clean, natural sentence.",
-      "- Drop fillers and repetitions. If they corrected themselves, keep ONLY the corrected version.",
-      "- Do not add, guess at, or invent anything that was not actually said.",
-      "- Never mention that you cleaned anything up.",
-      "- If the meaning is genuinely ambiguous, pick the most likely reading and keep it short."
-    );
-  }
-
-  lines.push(
+    "- Spanish or any other language -> translate into natural spoken Korean.",
     "",
+    "HOW THE SPEAKER TALKS",
+    "This person is thinking out loud, live and unrehearsed. Expect heavy disfluency:",
+    "- filler sounds and filler words",
+    "- long hesitations in the middle of a sentence",
+    "- the same word or phrase repeated several times",
+    "- false starts and abandoned sentences",
+    "- mid-sentence self-corrections",
+    "- tangents, backtracking, and ideas finished out of order",
+    "- sentences that trail off without ever finishing",
+    "",
+    "YOUR JOB",
+    "Work out the ONE thing the speaker is actually trying to get across, and say it as a clean,",
+    "natural, complete sentence — the way they would have said it if they had planned it first.",
+    "",
+    "- Listen to the WHOLE recording before deciding. The real point often arrives at the very end.",
+    "- If they correct themselves, keep ONLY the final corrected version. Discard what it replaced.",
+    "- If they restart a sentence, keep only the last attempt.",
+    "- If a sentence trails off but the intended ending is obvious, finish it naturally.",
+    "- If they circle the same idea several times, merge it into one clear sentence.",
+    "- Drop every sound and word that carries no meaning.",
+    "- Silence and hesitation carry no meaning. Ignore them entirely.",
+    "",
+    "LIMITS ON WHAT YOU MAY SUPPLY",
+    "You may complete the grammar and the shape of the sentence. You may NOT supply content:",
+    "never introduce a fact, name, number, price, time, place, opinion or intention the speaker",
+    "did not actually express. Finishing 'I want to... uh...' as 'I want to go' is only allowed",
+    "when the rest of the recording makes it unmistakable. When it is not, translate the fragment",
+    "as a fragment rather than guessing.",
+    "",
+    "OUTPUT",
     "Translate meaning, not words. Use how a native actually speaks in casual conversation.",
     "Keep the speaker's register and tone. Keep names, numbers, prices and times exact.",
+    "If the speaker genuinely said several separate things, use several short sentences.",
+    "Never mention that you cleaned anything up. Never note that the speech was unclear or hesitant.",
     "Never add greetings, notes, apologies, romanization or alternative translations.",
-    "If the audio is empty or unintelligible, put UNCLEAR after <<<DST>>> and stop.",
+    "If the recording is empty or truly unintelligible, put UNCLEAR after <<<DST>>> and stop.",
     "",
     "Answer in EXACTLY this order and nothing else:",
     "<<<LANG>>>ko or es",
     "<<<DST>>>the translation",
-    "<<<SRC>>>the cleaned-up sentence in the original language"
-  );
-  return lines.join("\n");
+    "<<<SRC>>>the tidied sentence in the language that was spoken"
+  ].join("\n");
 }
 
 /* Parse whatever has arrived so far; safe to call on partial text. */
@@ -237,7 +262,9 @@ function buildBody(base64, mimeType, model, stream){
     ],
     generation_config: {
       temperature: 0.2,
-      thinking_level: "low"
+      // untangling false starts and self-corrections is reasoning work,
+      // so this is deliberately not the cheapest setting
+      thinking_level: "medium"
     },
     stream: !!stream
   };
@@ -364,7 +391,7 @@ async function callBlocking(base64, mime, model){
 }
 
 async function interpret(base64, mime, onPartial){
-  const model = settings.mode === "good" ? settings.modelGood : settings.modelFast;
+  const model = settings.model;
   if (settings.stream){
     try {
       const r = await callStreaming(base64, mime, model, onPartial);
@@ -406,6 +433,15 @@ let stream = null, recorder = null, chunks = [];
 let audioCtx = null, analyser = null, levelTimer = null;
 let recording = false, busy = false;
 let startedAt = 0, sawSpeech = false, silentSince = 0, hardStop = null, durationMs = 0;
+let voicedMs = 0, pauses = 0, lastTick = 0, wasVoiced = false;
+
+/* How long a pause is tolerated before the recording is closed.
+   Grows every time the speaker stops and starts again, so someone who
+   thinks mid-sentence is given more room, not less. */
+function pauseAllowance(){
+  const base = Number(settings.silenceMs) || DEFAULTS.silenceMs;
+  return Math.min(MAX_PAUSE_MS, base + pauses * PAUSE_BONUS_MS);
+}
 
 async function ensureStream(){
   if (stream && stream.active) return stream;
@@ -433,11 +469,33 @@ function startLevelMeter(src){
       el.lvl.style.width = Math.min(100, Math.round(rms * 900)) + "%";
 
       const now = Date.now();
-      if (rms > SILENCE_RMS){ sawSpeech = true; silentSince = 0; }
-      else if (sawSpeech){
+      const dt = lastTick ? now - lastTick : 0;
+      lastTick = now;
+      const voiced = rms > SILENCE_RMS;
+
+      if (voiced){
+        if (!wasVoiced && sawSpeech) pauses++;   // they picked the thread back up
+        sawSpeech = true;
+        wasVoiced = true;
+        silentSince = 0;
+        voicedMs += dt;
+        setStatus("듣는 중…");
+      } else if (sawSpeech){
+        wasVoiced = false;
         if (!silentSince) silentSince = now;
-        const hold = Number(settings.silenceMs) || DEFAULTS.silenceMs;
-        if (settings.autoStop && now - silentSince > hold && now - startedAt > MIN_SPEECH_MS) stopRecording();
+        const waited = now - silentSince;
+        const allowance = pauseAllowance();
+
+        if (waited > 600){
+          const left = Math.max(0, Math.ceil((allowance - waited) / 1000));
+          setStatus("계속 말씀하셔도 됩니다 · " + left + "초 뒤 자동 종료");
+        }
+        if (settings.autoStop &&
+            waited > allowance &&
+            voicedMs > MIN_VOICED_MS &&
+            now - startedAt > MIN_SPEECH_MS){
+          stopRecording();
+        }
       }
     }, 80);
   } catch (e) {}
@@ -467,6 +525,7 @@ async function startRecording(){
     recorder.start();
 
     recording = true; sawSpeech = false; silentSince = 0; startedAt = Date.now();
+    voicedMs = 0; pauses = 0; lastTick = 0; wasVoiced = false;
     el.mic.classList.add("rec");
     el.mic.textContent = "■";
     setStatus("듣는 중…");
@@ -695,10 +754,8 @@ function closeDlg(d){
 
 function openSettings(){
   el.apiKey.value = settings.apiKey;
-  el.mFast.value = settings.modelFast;
-  el.mGood.value = settings.modelGood;
+  el.model.value = settings.model;
   el.dialect.value = settings.dialect;
-  el.tidy.checked = !!settings.tidy;
   el.autoSpeak.checked = !!settings.autoSpeak;
   el.autoStop.checked = !!settings.autoStop;
   el.silence.value = settings.silenceMs;
@@ -708,23 +765,14 @@ function openSettings(){
   openDlg(el.settings);
 }
 
-function applyMode(mode){
-  settings.mode = mode;
-  persist();
-  el.modeFast.classList.toggle("on", mode === "fast");
-  el.modeGood.classList.toggle("on", mode === "good");
-}
-
 el.openSettings.onclick = openSettings;
 el.saveSettings.onclick = () => {
   settings.apiKey = el.apiKey.value.trim();
-  settings.modelFast = el.mFast.value.trim() || DEFAULTS.modelFast;
-  settings.modelGood = el.mGood.value.trim() || DEFAULTS.modelGood;
+  settings.model = el.model.value.trim() || DEFAULTS.model;
   settings.dialect = el.dialect.value;
-  settings.tidy = el.tidy.checked;
   settings.autoSpeak = el.autoSpeak.checked;
   settings.autoStop = el.autoStop.checked;
-  settings.silenceMs = Math.min(4000, Math.max(400, Number(el.silence.value) || DEFAULTS.silenceMs));
+  settings.silenceMs = Math.min(MAX_PAUSE_MS, Math.max(800, Number(el.silence.value) || DEFAULTS.silenceMs));
   settings.stream = el.stream.checked;
   settings.freeLimit = Math.max(0, Number(el.freeLimit.value) || 0);
   settings.fx = Math.max(0, Number(el.fx.value) || 0);
@@ -745,8 +793,6 @@ el.resetUsage.onclick = () => {
   refreshMeter(); refreshUsageDialog();
 };
 
-el.modeFast.onclick = () => applyMode("fast");
-el.modeGood.onclick = () => applyMode("good");
 el.mic.onclick = () => { if (busy) return; recording ? stopRecording() : startRecording(); };
 
 document.addEventListener("keydown", (e) => {
@@ -784,7 +830,7 @@ if ("serviceWorker" in navigator && secureCtx){
 
 /* ---------------- boot ---------------- */
 
-applyMode(settings.mode);
+persist();
 refreshMeter();
 showWelcome();
 
