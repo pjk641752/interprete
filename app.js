@@ -6,6 +6,8 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
+const APP_VERSION = "2026-09-18.1";
+
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
 /* Audio is billed at 32 tokens per second of input. */
@@ -57,6 +59,7 @@ const el = {};
   "mToday","mLeft","mCost","mBar",
   "settings","saveSettings","shareBtn","apiKey","model","dialect",
   "autoSpeak","autoStop","silence","stream","freeLimit","fx",
+  "verNow","checkUpdate","verMsg",
   "usage","closeUsage","exportBtn","resetUsage",
   "uMonthCost","uMonthPeso","uDayReq","uDayLeft","uDayIn","uDayOut","uDayCost",
   "uMonReq","uMonIn","uMonOut","uAvg","uPrices"
@@ -616,6 +619,7 @@ async function onRecordingStopped(){
   } finally {
     busy = false;
     resetMic();
+    if (reloadPending) setTimeout(flushPendingReload, 1500);
   }
 }
 
@@ -753,6 +757,8 @@ function closeDlg(d){
 }
 
 function openSettings(){
+  el.verNow.textContent = APP_VERSION;
+  el.verMsg.textContent = "";
   el.apiKey.value = settings.apiKey;
   el.model.value = settings.model;
   el.dialect.value = settings.dialect;
@@ -783,6 +789,28 @@ el.saveSettings.onclick = () => {
   setStatus(settings.apiKey ? "준비됨 — 버튼을 누르고 말하십시오" : "API 키를 먼저 넣어주십시오");
 };
 el.shareBtn.onclick = shareApp;
+
+el.checkUpdate.onclick = async () => {
+  el.verMsg.textContent = " 확인 중…";
+  try {
+    // ask the server directly, bypassing every cache
+    const res = await fetch("app.js?t=" + Date.now(), { cache: "no-store" });
+    const txt = await res.text();
+    const m = /APP_VERSION\s*=\s*"([^"]+)"/.exec(txt);
+    const latest = m ? m[1] : null;
+    if (!latest){ el.verMsg.textContent = " 확인하지 못했습니다."; return; }
+    if (latest === APP_VERSION){ el.verMsg.textContent = " 최신입니다 (" + latest + ")"; return; }
+    el.verMsg.textContent = " 새 버전 " + latest + " — 적용합니다…";
+    if (swReg) { try { await swReg.update(); } catch (e) {} }
+    try {
+      const keys = await caches.keys();
+      await Promise.all(keys.map((k) => caches.delete(k)));
+    } catch (e) {}
+    setTimeout(() => location.reload(), 600);
+  } catch (e) {
+    el.verMsg.textContent = " 확인 실패 — 인터넷을 확인하십시오.";
+  }
+};
 
 el.openUsage.onclick = el.meter.onclick = () => { refreshUsageDialog(); openDlg(el.usage); };
 el.closeUsage.onclick = () => closeDlg(el.usage);
@@ -822,10 +850,45 @@ window.addEventListener("beforeinstallprompt", (e) => {
 
 const secureCtx = location.protocol === "https:" ||
                   location.hostname === "localhost" || location.hostname === "127.0.0.1";
+
+/* Updates land by themselves. When a new service worker takes control we
+   reload — but never in the middle of a recording or a translation, or the
+   user loses the sentence they were saying. */
+let swReg = null, reloadPending = false, reloading = false;
+
+function reloadForUpdate(){
+  if (reloading) return;
+  if (recording || busy){ reloadPending = true; setStatus("업데이트 준비됨 — 이 문장 끝나면 적용됩니다"); return; }
+  reloading = true;
+  location.reload();
+}
+function flushPendingReload(){ if (reloadPending && !recording && !busy) reloadForUpdate(); }
+
 if ("serviceWorker" in navigator && secureCtx){
+  navigator.serviceWorker.addEventListener("controllerchange", reloadForUpdate);
+
   window.addEventListener("load", () => {
-    navigator.serviceWorker.register("sw.js").catch(() => {});
+    navigator.serviceWorker.register("sw.js").then((reg) => {
+      swReg = reg;
+      // an update that installed while the page was open
+      reg.addEventListener("updatefound", () => {
+        const sw = reg.installing;
+        if (!sw) return;
+        sw.addEventListener("statechange", () => {
+          if (sw.state === "installed" && navigator.serviceWorker.controller) reloadForUpdate();
+        });
+      });
+    }).catch(() => {});
   });
+
+  // check for a new version whenever the app is brought back to the front
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible" && swReg){
+      swReg.update().catch(() => {});
+      flushPendingReload();
+    }
+  });
+  window.addEventListener("focus", () => { if (swReg) swReg.update().catch(() => {}); });
 }
 
 /* ---------------- boot ---------------- */
