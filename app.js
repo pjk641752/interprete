@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-18.3";
+const APP_VERSION = "2026-09-18.4";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -56,7 +56,7 @@ const el = {};
 [
   "main","errBox","result","histWrap","status","mic","lvl","meter",
   "textIn","textSend",
-  "openUsage","openSettings",
+  "sendKakao","openUsage","openSettings",
   "mToday","mLeft","mCost","mBar",
   "settings","saveSettings","shareBtn","apiKey","model","dialect",
   "autoSpeak","autoStop","silence","stream","freeLimit","fx",
@@ -874,6 +874,125 @@ function showWelcome(){
     '</div>';
 }
 
+/* ---------------- daily study note ---------------- */
+
+const SUMMARY_PROMPT = [
+  "You are making a study note for a Korean speaker living in Mexico who is learning Spanish.",
+  "Below is everything they interpreted today, as JSON. Each row has the Spanish (es),",
+  "the Korean (ko), an optional tip, and the study chunks they already saw.",
+  "",
+  "Write ONE plain-text note in Korean they can read on their phone. Rules:",
+  "- Plain text only. No markdown, no #, no *, no tables. KakaoTalk cannot render them.",
+  "- Merge duplicates and near-duplicates. If they hit the same phrase five times, list it once.",
+  "- Put the highest-value items first. Value = they will need it again soon.",
+  "- Drop anything trivial, one-off, or that carries no learning (greetings, yes/no, bare numbers).",
+  "- Never invent a word or sentence that is not in the data.",
+  "",
+  "Use exactly this shape, and omit any section that would be empty:",
+  "",
+  "[MONTH]월 [DAY]일 스페인어",
+  "대화 [N]회",
+  "",
+  "[ 오늘의 단어 ]",
+  "- spanish : 한국어 뜻",
+  "(up to 12, most useful first)",
+  "",
+  "[ 꼭 외울 문장 ]",
+  "1. spanish",
+  "   한국어",
+  "(up to 6, the ones actually worth memorising)",
+  "",
+  "[ 알아둘 것 ]",
+  "- one short Korean line",
+  "(up to 4, merge overlapping tips, skip the section if there are none)",
+  "",
+  "Output the note only. No preamble, no closing remark."
+].join("\n");
+
+async function callPlain(systemInstr, userText){
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: { "x-goog-api-key": settings.apiKey, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: settings.model,
+      system_instruction: systemInstr,
+      input: userText,
+      generation_config: { temperature: 0.3, thinking_level: "low" }
+    })
+  });
+  const raw = await res.text();
+  let json = null; try { json = JSON.parse(raw); } catch (e) {}
+  if (!res.ok){
+    throw apiError(res.status, (json && json.error && json.error.message) || raw.slice(0, 400), settings.model);
+  }
+  const text = extractText(json);
+  if (!text) throw new Error("정리 결과를 받지 못했습니다.\n" + raw.slice(0, 300));
+  const u = readUsage(json);
+  if (u){
+    addUsage(u.inTok, u.outTok, 0, computeCost(settings.model, u.inTok, u.outTok, 0));
+    refreshMeter();
+  }
+  return text.trim();
+}
+
+function todaysEntries(){
+  const d = todayKey();
+  return loadLog().filter((e) => (e.at || "").slice(0, 10) === d);
+}
+
+async function buildDailyNote(rows){
+  const payload = rows.map((e) => ({
+    es: spanishOf(e),
+    ko: koreanOf(e),
+    tip: e.tip || undefined,
+    chunks: (e.study || []).map((s) => s.es + " = " + s.ko)
+  }));
+  const now = new Date();
+  const header = "오늘은 " + (now.getMonth() + 1) + "월 " + now.getDate() +
+                 "일이고, 대화는 " + rows.length + "회입니다.\n\n";
+  return await callPlain(SUMMARY_PROMPT, header + JSON.stringify(payload));
+}
+
+async function sendDailyNote(){
+  if (busy || recording) return;
+  if (!settings.apiKey){ openSettings(); return; }
+
+  const rows = todaysEntries();
+  if (!rows.length){ alert("오늘 나눈 대화가 없습니다."); return; }
+
+  const btn = el.sendKakao;
+  busy = true;
+  if (btn) btn.disabled = true;
+  showError("");
+  setStatus("오늘 대화를 정리하는 중…");
+
+  try {
+    const note = await buildDailyNote(rows);
+    setStatus("보내는 중…");
+
+    let handled = false;
+    if (navigator.share){
+      try { await navigator.share({ text: note }); handled = true; }
+      catch (e) { if (e && e.name === "AbortError") handled = true; } // user closed the sheet
+    }
+    if (!handled){
+      try {
+        await navigator.clipboard.writeText(note);
+        alert("복사했습니다.\n카카오톡 → 나와의 채팅 에 붙여넣으십시오.");
+      } catch (e) {
+        showError("보내기와 복사가 모두 막혔습니다. 아래 내용을 직접 복사하십시오.\n\n" + note);
+      }
+    }
+    setStatus("정리 " + rows.length + "건 보냄");
+  } catch (e) {
+    showError((e && e.message) ? e.message : String(e));
+    setStatus("정리에 실패했습니다");
+  } finally {
+    busy = false;
+    if (btn) btn.disabled = false;
+  }
+}
+
 /* ---------------- export / share ---------------- */
 
 function exportLog(){
@@ -969,6 +1088,7 @@ el.checkUpdate.onclick = async () => {
   }
 };
 
+el.sendKakao.onclick = sendDailyNote;
 el.openUsage.onclick = el.meter.onclick = () => { refreshUsageDialog(); openDlg(el.usage); };
 el.closeUsage.onclick = () => closeDlg(el.usage);
 el.exportBtn.onclick = exportLog;

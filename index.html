@@ -87,7 +87,11 @@
   .scard .tip{margin-top:10px}
 
   /* study cards */
-  .study-head{display:flex;align-items:center;justify-content:space-between;margin:20px 2px 9px}
+  .study-head{display:flex;align-items:center;justify-content:space-between;margin:20px 2px 9px;gap:8px}
+  
+  .icon-btn.kakao{background:rgba(250,225,0,.12);border-color:rgba(250,225,0,.28);color:#f2e08a}
+  .icon-btn.kakao:active{background:rgba(250,225,0,.22)}
+  .mini:disabled{opacity:.5}
   .hist-title{color:var(--dim);font-size:10.5px;font-weight:700;letter-spacing:.8px;text-transform:uppercase}
   .scard{background:var(--surface);border:1px solid var(--line);border-radius:14px;padding:13px 14px;margin-bottom:9px}
   .s-es{font-size:17px;font-weight:650;color:var(--es);line-height:1.4;word-break:break-word}
@@ -170,6 +174,7 @@
 <header>
   <span class="brand">통역기</span>
   <span class="spacer"></span>
+  <button class="icon-btn kakao" id="sendKakao" type="button" aria-label="오늘 정리 카톡으로 보내기">💬</button>
   <button class="icon-btn" id="openUsage" type="button" aria-label="사용량">📊</button>
   <button class="icon-btn" id="openSettings" type="button" aria-label="설정">⚙</button>
 </header>
