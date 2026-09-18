@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-18.2";
+const APP_VERSION = "2026-09-18.3";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -198,6 +198,18 @@ function systemInstruction(kind){
 
   const tail = [
     "",
+    "ONE TIP",
+    "Give the single most useful thing a Korean learner should know about THIS sentence,",
+    "in ONE short Korean line. Pick by this priority:",
+    "1. Something that would cause a misunderstanding, or make them sound rude or too formal.",
+    "2. A Mexican-specific usage a textbook would get wrong (ahorita, mande, ¿bueno?, güey, chido...).",
+    "3. What a local would more naturally say instead, if this phrasing is stiff or bookish.",
+    "4. A mistake Korean speakers specifically make here (ser/estar, por/para, gender, false friends).",
+    "5. A pronunciation trap in this exact sentence.",
+    "Write it in Korean, plainly, under 60 characters. No lead-in, no 'Tip:', just the fact.",
+    "If there is genuinely nothing worth saying, output the line empty. An obvious or filler tip",
+    "is worse than none — never state what the sentence means or that it is a question.",
+    "",
     "STUDY BREAKDOWN",
     "The user is a Korean speaker learning Spanish. After the translation, break the SPANISH",
     "side of this exchange into the pieces worth memorising — whichever side the Spanish is on.",
@@ -213,6 +225,7 @@ function systemInstruction(kind){
     "<<<LANG>>>ko or es",
     "<<<DST>>>the translation",
     "<<<SRC>>>the tidied sentence in the language that was given",
+    "<<<TIP>>>one short Korean line, or nothing at all",
     "<<<STUDY>>>",
     "spanish :: korean",
     "spanish :: korean"
@@ -274,34 +287,51 @@ function systemInstruction(kind){
   ]).concat(tail).join("\n");
 }
 
-/* Parse whatever has arrived so far; safe to call on partial text. */
-function partialParse(acc){
-  const lang = /<<<LANG>>>\s*([a-z]+)/i.exec(acc);
-  const dstAt = acc.indexOf("<<<DST>>>");
-  const srcAt = acc.indexOf("<<<SRC>>>");
-  const stAt = acc.indexOf("<<<STUDY>>>");
-  let dst = "", src = "", studyRaw = "";
+const MARKERS = ["LANG", "DST", "SRC", "TIP", "STUDY"];
 
-  const endOfDst = srcAt >= 0 ? srcAt : (stAt >= 0 ? stAt : undefined);
-  if (dstAt >= 0) dst = acc.slice(dstAt + 9, endOfDst);
-  if (srcAt >= 0) src = acc.slice(srcAt + 9, stAt >= 0 ? stAt : undefined);
-  if (stAt >= 0) studyRaw = acc.slice(stAt + 11);
+/* Split the reply into its marked sections. Order-independent and safe to
+   call on a half-arrived stream, so adding a section cannot break parsing. */
+function splitSections(acc){
+  const found = [];
+  for (const name of MARKERS){
+    const tag = "<<<" + name + ">>>";
+    const at = acc.indexOf(tag);
+    if (at >= 0) found.push({ name: name, at: at, end: at + tag.length });
+  }
+  found.sort((a, b) => a.at - b.at);
 
+  const out = {};
+  for (let i = 0; i < found.length; i++){
+    const next = found[i + 1];
+    out[found[i].name] = acc.slice(found[i].end, next ? next.at : undefined).trim();
+  }
+  return out;
+}
+
+function parseStudy(raw){
   const study = [];
-  for (const line of studyRaw.split("\n")){
+  if (!raw) return study;
+  for (const line of raw.split("\n")){
     const i = line.indexOf("::");
     if (i < 0) continue;
     const es = line.slice(0, i).trim().replace(/^[-*\d.\s]+/, "");
     const ko = line.slice(i + 2).trim();
     if (es && ko) study.push({ es: es, ko: ko });
   }
+  return study;
+}
 
+function partialParse(acc){
+  const s = splitSections(acc);
+  const tip = (s.TIP || "").replace(/^(tip|팁)\s*[:：]\s*/i, "").trim();
   return {
-    lang: lang ? lang[1].toLowerCase() : "",
-    dst: dst.trim(),
-    src: src.trim(),
-    study: study,
-    dstDone: srcAt >= 0 || stAt >= 0
+    lang: (s.LANG || "").toLowerCase().replace(/[^a-z]/g, ""),
+    dst: s.DST || "",
+    src: s.SRC || "",
+    tip: tip,
+    study: parseStudy(s.STUDY),
+    // the translation is settled once any later section has started
+    dstDone: ("SRC" in s) || ("TIP" in s) || ("STUDY" in s)
   };
 }
 
@@ -666,6 +696,7 @@ async function runInterpret(src, audioMs){
         to: lang === "ko" ? "es" : "ko",
         src: p.src,
         dst: p.dst,
+        tip: p.tip,
         study: p.study,
         model: out.model,
         ms: elapsed,
@@ -729,7 +760,12 @@ function renderLive(p){
       '<p class="dst ' + to + '">' + esc(p.dst) +
         (p.dstDone ? "" : '<span class="caret"></span>') + '</p>' +
       '<p class="src">' + esc(p.src) + '</p>' +
+      tipHtml(p.tip) +
     '</div>';
+}
+
+function tipHtml(tip){
+  return tip ? '<div class="tip"><span>💡</span><p>' + esc(tip) + '</p></div>' : "";
 }
 
 function render(entry){
@@ -738,6 +774,7 @@ function render(entry){
       '<div class="dir">' + dirLabel(entry.from, entry.to) + '</div>' +
       '<p class="dst ' + entry.to + '">' + esc(entry.dst) + '</p>' +
       '<p class="src">' + esc(entry.src) + '</p>' +
+      tipHtml(entry.tip) +
       '<div class="row">' +
         '<button class="mini" data-act="speak">🔊 읽어주기</button>' +
         '<button class="mini" data-act="copy">복사</button>' +
@@ -787,6 +824,7 @@ function renderHistoryOnly(){
       }
       html += '</div>';
     }
+    html += tipHtml(e.tip);
     html += '</div>';
   }
   el.histWrap.innerHTML = html;
