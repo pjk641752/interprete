@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-18.4";
+const APP_VERSION = "2026-09-29.1";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -909,7 +909,9 @@ const SUMMARY_PROMPT = [
   "Output the note only. No preamble, no closing remark."
 ].join("\n");
 
-async function callPlain(systemInstr, userText){
+/* genConfig is optional: the daily note keeps the cheap default, the audio
+   lesson asks for more reasoning because it writes grammar notes. */
+async function callPlain(systemInstr, userText, genConfig){
   const res = await fetch(API_URL, {
     method: "POST",
     headers: { "x-goog-api-key": settings.apiKey, "Content-Type": "application/json" },
@@ -917,7 +919,7 @@ async function callPlain(systemInstr, userText){
       model: settings.model,
       system_instruction: systemInstr,
       input: userText,
-      generation_config: { temperature: 0.3, thinking_level: "low" }
+      generation_config: genConfig || { temperature: 0.3, thinking_level: "low" }
     })
   });
   const raw = await res.text();
@@ -1044,6 +1046,7 @@ function openSettings(){
   el.stream.checked = !!settings.stream;
   el.freeLimit.value = settings.freeLimit;
   el.fx.value = settings.fx;
+  if (typeof lessonFillSettings === "function") lessonFillSettings();
   openDlg(el.settings);
 }
 
@@ -1059,6 +1062,7 @@ el.saveSettings.onclick = () => {
   settings.freeLimit = Math.max(0, Number(el.freeLimit.value) || 0);
   settings.fx = Math.max(0, Number(el.fx.value) || 0);
   persist();
+  if (typeof lessonSaveSettings === "function") lessonSaveSettings();
   closeDlg(el.settings);
   showError("");
   refreshMeter();
