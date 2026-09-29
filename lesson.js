@@ -1368,7 +1368,15 @@ function lessonNotice(text){
 
 function mountLesson(rec, notice){
   stopPlayer();
-  current = { lesson: rec.lesson, blob: rec.mp3 || null, engine: rec.engine, date: rec.date };
+  current = { lesson: rec.lesson, blob: rec.mp3 || null, engine: rec.engine, date: rec.date,
+              qa: Array.isArray(rec.qa) ? rec.qa : [] };
+  /* a new lesson means a new conversation: nothing half-asked carries over, and
+     the cached answer audio belonged to the old lesson's turn numbers */
+  askPending = null;
+  askAudioCache.clear();
+  askShow(true);
+  askLock("idle");
+  askRender();
   $("lTitle").textContent = rec.lesson.dateLabel + " 수업";
   renderTransport();
   lessonNotice(notice);
@@ -1394,6 +1402,7 @@ function mountLesson(rec, notice){
 function lessonMessage(title, sub, extraHtml){
   $("lCtl").innerHTML = "";
   resetTickCache();                 // the transport this cache described is gone
+  askShow(false);                   // nothing to ask about on a busy/error screen
   lessonNotice("");
   $("lBody").innerHTML = '<div class="L-busy"><div class="L-busy-t">' + esc(title) + "</div>" +
     '<div class="L-busy-s">' + esc(sub || "") + "</div>" + (extraHtml || "") + "</div>";
@@ -1401,6 +1410,429 @@ function lessonMessage(title, sub, extraHtml){
 function lessonBusySub(sub){
   const n = $("lBody").querySelector(".L-busy-s");
   if (n) n.textContent = sub;
+}
+
+/* ---------------- asking the lesson a question ----------------
+
+   A tutor, not a translator. "아까 mételo 는 왜 붙여 쓰는 거야?" only means
+   something next to the lesson it was asked about, so every question carries
+   the whole lesson, the line that was playing and the last few turns — and the
+   model is told to resolve 아까 그거 / 이 문장 itself rather than ask back. */
+
+const ASK_PROMPT = [
+  "You are a patient Spanish tutor for a Korean beginner living in Mexico. They are",
+  "listening to today's audio lesson, have stopped it, and are asking you something.",
+  "",
+  "You are NOT a translator. Do not translate the question — answer it.",
+  "",
+  "You are given ONE JSON object:",
+  "  question — what they asked. If it says the question is in the attached audio,",
+  "             listen to the audio: that is the question. They speak Korean and may",
+  "             drop Spanish words into it.",
+  "  lesson   — every line of today's lesson: part (교시), es, ko, and for a grammar",
+  "             note grammar:true. This is the material they are studying.",
+  "  playing  — the line on screen when they asked. May be null.",
+  "  history  — the last few questions and answers, oldest first.",
+  "",
+  "Demonstratives — 아까 그거, 이 문장, 그 단어, 방금 — point at `playing` first, then",
+  "at the newest thing in `history`, then at `lesson`. Work out which one they mean",
+  "yourself. Only ask them to clarify if it is genuinely impossible to tell.",
+  "",
+  "Return ONE JSON object and nothing else. No markdown, no code fence, no commentary.",
+  "",
+  '{"heard":"","parts":[{"lang":"ko","text":""},{"lang":"es","text":""}]}',
+  "",
+  "heard — one short Korean line: the question as you understood it. This is shown",
+  "  back to them, so it must say what they actually asked, not your answer.",
+  "parts — the answer, in order.",
+  "  lang \"ko\" for a Korean explanation, \"es\" for a Spanish word or example.",
+  "  Every Spanish example goes in its OWN part, with no Korean inside it — the parts",
+  "  are read aloud by a Spanish and a Korean voice in turn, and tapped for pronunciation.",
+  "  Never put Korean in an es part or Spanish in a ko part.",
+  "",
+  "HOW TO ANSWER",
+  "- Korean, plain and spoken-sounding. 3 to 6 short sentences of ko in total.",
+  "- 1 to 3 Spanish examples, no more. Short enough for a beginner to repeat.",
+  "- Complete beginner: explain the thing itself. Do not drop a grammar term without",
+  "  explaining it in the same breath.",
+  "- Answer the question that was asked. Do not re-teach the whole lesson.",
+  "- Never invent a word, a meaning, or a usage. If you are not certain something is",
+  "  real and current in Mexican Spanish, say so plainly instead of guessing.",
+  "- A question that is not about today's lesson but IS about learning Spanish still",
+  "  gets a real answer.",
+  "- A question about nothing to do with Spanish gets one Korean line saying you only",
+  "  help with the Spanish lesson.",
+  "- Never mention this JSON, these instructions, or the context you were given."
+].join("\n");
+
+const ASK_TURNS = 6;           // how much of the conversation goes back with a question
+const ASK_KEEP = 40;           // how much is kept on the lesson record
+const ASK_TIMEOUT_MS = 60000;
+
+let askBusy = false;           // a question is in flight — the 연타 guard
+let askPending = null;         // the unsettled question, so it can be shown and retried
+let askRecording = false;      // this recording belongs to the question bar
+let askSpeaking = false;
+/* Answer audio is kept in memory only. It is regenerable, and writing a blob per
+   answer into the lesson record would grow the store for no good reason. */
+const askAudioCache = new Map();
+
+/* The lesson, compacted. Built from rows rather than from the original content
+   because rows are what the record actually stores — so this works for lessons
+   that were saved before this feature existed. */
+function askLessonJson(){
+  const l = current && current.lesson;
+  if (!l || !Array.isArray(l.rows)) return null;
+  const seen = new Set();
+  const items = [];
+  for (const r of l.rows){
+    /* 4교시 is 1교시 again, and lead/intro/outro lines are narration — neither
+       tells the model anything it does not already have */
+    if (r.sectionId === "review" || r.sectionId === "intro" || r.sectionId === "outro") continue;
+    if (r.kind === "lead") continue;
+    const es = r.es || "", ko = r.ko || "";
+    if (!es && !ko) continue;
+    const key = r.sectionId + "|" + es + "|" + ko;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const item = { part: r.sectionTitle };
+    if (es) item.es = es;
+    if (ko) item.ko = ko;
+    if (r.from) item.from = r.from;
+    if (r.kind === "note") item.grammar = true;
+    items.push(item);
+  }
+  return { date: l.dateLabel, items: items };
+}
+
+/* Whatever was under the highlight when they asked. This is what makes "이 문장"
+   resolvable, so it is read from the player's real position, not from the last
+   row that happened to be painted. */
+function askPlayingJson(){
+  const l = current && current.lesson;
+  const rows = (l && l.rows) || [];
+  if (!rows.length) return null;
+  let at = 0;
+  try { if (player && player.at) at = player.at(); } catch (e) {}
+  const r = rows[rowAt(rows, at)];
+  if (!r) return null;
+  const out = { part: r.sectionTitle };
+  if (r.es) out.es = r.es;
+  if (r.ko) out.ko = r.ko;
+  return out;
+}
+
+function askHistoryJson(){
+  const qa = (current && current.qa) || [];
+  return qa.slice(-ASK_TURNS)
+    .filter((t) => t && t.q && Array.isArray(t.parts))
+    .map((t) => ({ q: t.q, a: t.parts.map((p) => p.text).join(" ") }));
+}
+
+function askContextJson(pending){
+  return JSON.stringify({
+    question: pending.via === "voice" ? "(in the attached audio)" : pending.q,
+    lesson: askLessonJson(),
+    playing: pending.playing || null,
+    history: askHistoryJson()
+  });
+}
+
+/* A reply that is not the JSON we asked for is still an answer. Showing it as
+   one Korean bubble beats throwing away something already paid for — only a
+   genuinely empty reply is an error. */
+function askParse(text){
+  let raw = null;
+  try { raw = lessonExtractJson(text); } catch (e) {}
+
+  if (raw && Array.isArray(raw.parts)){
+    const parts = [];
+    for (const p of raw.parts){
+      const t = cleanStr(p && p.text);
+      if (!t) continue;
+      parts.push({ lang: (p && p.lang) === "es" ? "es" : "ko", text: t });
+    }
+    if (parts.length) return { heard: cleanStr(raw.heard), parts: parts };
+  }
+
+  const plain = cleanStr(String(text || "")
+    .replace(/^```[a-z]*\s*/i, "").replace(/```\s*$/, ""));
+  if (plain) return { heard: "", parts: [{ lang: "ko", text: plain }] };
+  throw new Error("답변이 비어 있습니다.");
+}
+
+/* ---- the question bar ---- */
+
+/* "idle" | "rec" | "think" */
+function askLock(state){
+  const q = $("lQ"), mic = $("lQMic"), send = $("lQSend");
+  if (q) q.disabled = state !== "idle";
+  if (send) send.disabled = state !== "idle";
+  if (mic){
+    mic.disabled = state === "think";
+    mic.classList.toggle("rec", state === "rec");
+    mic.textContent = state === "rec" ? "■" : "🎤";
+  }
+}
+
+function askShow(on){
+  const ask = $("lAsk");
+  if (ask) ask.hidden = !on;
+  if (!on){
+    const box = $("lChat");
+    if (box) box.innerHTML = "";
+  }
+}
+
+function askBubble(cls, inner){
+  return '<div class="Q-turn ' + cls + '"><div class="Q-bub">' + inner + "</div></div>";
+}
+
+function askAnswerHtml(parts, idx){
+  let inner = "";
+  for (const p of parts){
+    inner += p.lang === "es"
+      ? '<span class="Q-es" data-say="' + esc(p.text) + '">' + esc(p.text) + "</span>"
+      : '<div class="Q-ko">' + esc(p.text) + "</div>";
+  }
+  inner += '<div class="Q-tools"><button class="Q-say" data-i="' + idx +
+           '" type="button">&#128266; 읽어주기</button></div>';
+  return askBubble("", inner);
+}
+
+function askRender(){
+  const box = $("lChat");
+  if (!box) return;
+  const qa = (current && current.qa) || [];
+  let html = "";
+  for (let i = 0; i < qa.length; i++){
+    const t = qa[i];
+    if (!t || !Array.isArray(t.parts)) continue;
+    html += askBubble("me", '<div class="Q-ko">' + esc(t.q || "") + "</div>");
+    html += askAnswerHtml(t.parts, i);
+  }
+  if (askPending){
+    html += askBubble("me", '<div class="Q-ko">' +
+      esc(askPending.via === "voice" && !askPending.q ? "🎤 음성 질문" : askPending.q) + "</div>");
+    html += askPending.err
+      ? askBubble("err", '<div class="Q-ko">' + esc(askPending.err) + "</div>" +
+          (askPending.canRetry
+            ? '<div class="Q-tools"><button class="Q-retry" id="lQRetry" type="button">다시 시도</button></div>'
+            : ""))
+      : askBubble("", '<div class="Q-wait">생각 중…</div>');
+  }
+  box.innerHTML = html;
+
+  box.querySelectorAll(".Q-es").forEach((n) => {
+    n.onclick = () => askSpeakEs(n.getAttribute("data-say"));
+  });
+  box.querySelectorAll(".Q-say").forEach((b) => {
+    b.onclick = () => { askSpeak(Number(b.getAttribute("data-i")), b); };
+  });
+  const retry = $("lQRetry");
+  if (retry) retry.onclick = () => {
+    const again = askPending;
+    if (!again) return;
+    askPending = null;
+    askAsk(again);
+  };
+
+  box.scrollTop = box.scrollHeight;
+}
+
+/* ---- speaking an answer ---- */
+
+function askSpeakEs(text){
+  if (!text) return;
+  try {
+    window.speechSynthesis.cancel();
+    const u = new SpeechSynthesisUtterance(text);
+    const v = devPickVoice("es", devVoiceList());
+    u.lang = "es-MX";
+    if (v){ u.voice = v; u.lang = v.lang || u.lang; }
+    u.rate = 0.95;
+    window.speechSynthesis.speak(u);
+  } catch (e) {}
+}
+
+/* The device engine queues utterances, so pushing them in order is all that is
+   needed to alternate the two voices. */
+function askSpeakDevice(parts){
+  try {
+    window.speechSynthesis.cancel();
+    const list = devVoiceList();
+    const es = devPickVoice("es", list), ko = devPickVoice("ko", list);
+    for (const p of parts){
+      const u = new SpeechSynthesisUtterance(p.text);
+      const v = p.lang === "es" ? es : ko;
+      u.lang = p.lang === "es" ? "es-MX" : "ko-KR";
+      if (v){ u.voice = v; u.lang = v.lang || u.lang; }
+      window.speechSynthesis.speak(u);
+    }
+  } catch (e) {}
+}
+
+/* One mp3 for the whole answer, the two voices alternating by part — the same
+   encoder and the same voices the lesson itself uses. Falls back to the device
+   voices rather than failing: hearing it in a worse voice beats not hearing it. */
+async function askSpeak(i, btn){
+  const t = current && current.qa && current.qa[i];
+  if (!t || !Array.isArray(t.parts) || askSpeaking) return;
+
+  if (!(lset.engine === "cloud" && lset.ttsKey)){ askSpeakDevice(t.parts); return; }
+
+  askSpeaking = true;
+  const label = btn ? btn.innerHTML : "";
+  if (btn){ btn.disabled = true; btn.textContent = "만드는 중…"; }
+  try {
+    let blob = askAudioCache.get(i);
+    if (!blob){
+      const lame = await loadLame();
+      await ttsEnsureVoices();
+      const sr = TTS_SR;
+      const out = mp3Writer(lame, sr);
+      const gap = new Int16Array(Math.round(sr * 0.35));
+      for (let k = 0; k < t.parts.length; k++){
+        const p = t.parts[k];
+        const got = await ttsSay(p.text, p.lang === "es" ? "es" : "ko", 1);
+        addTtsChars(p.text.length);
+        out.write(got.sr === sr ? got.pcm : resample(got.pcm, got.sr, sr));
+        if (k < t.parts.length - 1) out.write(gap);
+      }
+      blob = out.finish();
+      askAudioCache.set(i, blob);
+    }
+    previewPlay(blob);
+  } catch (e) {
+    askSpeakDevice(t.parts);
+  } finally {
+    askSpeaking = false;
+    if (btn){ btn.disabled = false; btn.innerHTML = label || "&#128266; 읽어주기"; }
+  }
+}
+
+/* ---- storage ---- */
+
+/* Only the settled turns, and never the audio. The record is read back and put
+   whole so nothing else on it is disturbed. */
+async function qaPersist(){
+  if (!current || !current.date) return;
+  try {
+    const db = await openDb();
+    try {
+      const rec = await rq2p(lessonStore(db, "readonly").get(current.date));
+      if (!rec) return;
+      rec.qa = (current.qa || []).map((t) => ({
+        q: t.q, via: t.via, parts: t.parts, at: t.at
+      }));
+      await rq2p(lessonStore(db, "readwrite").put(rec));
+    } finally { db.close(); }
+  } catch (e) {
+    /* the answer is already on screen; losing only its history is not worth
+       interrupting the lesson for */
+  }
+}
+
+/* ---- asking ---- */
+
+async function askAsk(pending){
+  if (askBusy) return;                       // two taps, one question
+  if (!current){ return; }
+  if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
+
+  askBusy = true;
+  askLock("think");
+  /* they stopped to ask about something — the lesson must not keep talking
+     over the answer */
+  if (player){ try { player.pause(); } catch (e) {} }
+
+  /* the playing line is captured HERE, before the pause and the round trip can
+     move it, so "이 문장" means the line they were actually on */
+  askPending = Object.assign({ err: "", canRetry: true }, pending);
+  if (!askPending.playing) askPending.playing = askPlayingJson();
+  askRender();
+
+  try {
+    const input = askPending.audio
+      ? [{ type: "text", text: askContextJson(askPending) },
+         { type: "audio", data: askPending.audio.data, mime_type: askPending.audio.mime }]
+      : [{ type: "text", text: askContextJson(askPending) }];
+
+    const reply = await Promise.race([
+      callPlain(ASK_PROMPT, input, { temperature: 0.35, thinking_level: "low" },
+                askPending.audio ? askPending.audio.ms : 0),
+      new Promise((_, rej) => setTimeout(
+        () => rej(new Error("답이 " + (ASK_TIMEOUT_MS / 1000) + "초 안에 오지 않았습니다.")),
+        ASK_TIMEOUT_MS))
+    ]);
+
+    const got = askParse(reply);
+    const shown = askPending.via === "voice"
+      ? (got.heard || "🎤 음성 질문")
+      : askPending.q;
+
+    if (!current.qa) current.qa = [];
+    current.qa.push({ q: shown, via: askPending.via, parts: got.parts,
+                      at: new Date().toISOString() });
+    if (current.qa.length > ASK_KEEP) current.qa = current.qa.slice(-ASK_KEEP);
+    askPending = null;
+    askRender();
+    qaPersist();
+  } catch (e) {
+    if (askPending){
+      askPending.err = (e && e.message) ? String(e.message) : String(e);
+      askRender();
+    }
+  } finally {
+    askBusy = false;
+    askLock("idle");
+  }
+}
+
+function askSend(){
+  const q = $("lQ");
+  if (!q || askBusy) return;
+  const text = q.value.trim();
+  if (!text) return;
+  q.value = "";
+  askAsk({ q: text, via: "text" });
+}
+
+/* Borrows the interpreter's recorder: same auto-stop, same encoding, and only
+   the destination differs (see setRecTarget in app.js). */
+async function askMic(){
+  if (askBusy) return;
+  if (recording){                       // a second tap ends the recording
+    if (askRecording) askLock("think");
+    stopRecording();
+    return;
+  }
+  if (busy) return;
+  if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
+  if (player){ try { player.pause(); } catch (e) {} }
+
+  setRecTarget("ask");
+  askRecording = true;
+  askLock("rec");
+  await startRecording();
+  if (!recording){                      // the microphone never opened
+    askRecording = false;
+    setRecTarget("interpret");
+    askLock("idle");
+  }
+}
+
+/* called from app.js when a recording aimed at the question bar finishes */
+async function lessonAskAudio(b64, mime, ms){
+  askRecording = false;
+  await askAsk({ q: "", via: "voice", audio: { data: b64, mime: mime, ms: ms } });
+}
+function lessonAskTooShort(){
+  askRecording = false;
+  askPending = { q: "🎤 음성 질문", via: "voice", canRetry: false,
+                 err: "너무 짧습니다 — 다시 말해 주십시오." };
+  askRender();
+  askLock("idle");
 }
 
 /* ---------------- the 🎧 button ---------------- */
@@ -1517,7 +1949,8 @@ async function makeLessonRun(rows){
 
     const rec = {
       date: lesson.date, createdAt: new Date().toISOString(),
-      engine: blob ? "cloud" : "device", lesson: lesson, mp3: blob
+      engine: blob ? "cloud" : "device", lesson: lesson, mp3: blob,
+      qa: []                         // questions asked about this lesson
     };
 
     let saveNote = "";
@@ -1581,6 +2014,7 @@ async function showPast(){
   let all = [], listErr = null;
   try { all = await lessonList(); } catch (e) { listErr = e; }
   stopPlayer();
+  askShow(false);
   current = null;
 
   if (listErr){
@@ -2169,6 +2603,15 @@ async function lessonTestVoice(){
   if (open) open.onclick = () => { openLesson().catch((e) => showError((e && e.message) || String(e))); };
   const close = $("lClose");
   if (close) close.onclick = () => { stopPlayer(); closeDlg($("lesson")); };
+
+  const qIn = $("lQ");
+  if (qIn) qIn.onkeydown = (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey){ ev.preventDefault(); askSend(); }
+  };
+  const qSend = $("lQSend");
+  if (qSend) qSend.onclick = askSend;
+  const qMic = $("lQMic");
+  if (qMic) qMic.onclick = () => { askMic().catch(() => {}); };
   const test = $("lTestVoice");
   if (test) test.onclick = lessonTestVoice;
   const tryEs = $("lTryEs");
@@ -2176,5 +2619,16 @@ async function lessonTestVoice(){
   const tryKo = $("lTryKo");
   if (tryKo) tryKo.onclick = () => { lessonPreview("ko").catch(() => {}); };
   const dlg = $("lesson");
-  if (dlg) dlg.addEventListener("close", stopPlayer);
+  if (dlg) dlg.addEventListener("close", () => {
+    stopPlayer();
+    /* a question being recorded when the screen closes is abandoned, not sent:
+       without this the interpreter would pick the audio up and translate it */
+    if (askRecording){
+      askRecording = false;
+      setRecTarget("discard");
+      stopRecording();
+    }
+    askLock("idle");
+    try { window.speechSynthesis.cancel(); } catch (e) {}
+  });
 })();

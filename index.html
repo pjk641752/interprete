@@ -214,6 +214,35 @@
   .L-busy-s{font-size:13px;color:var(--muted);margin-top:8px;font-variant-numeric:tabular-nums;min-height:18px}
   .L-err{background:#2a1618;border:1px solid #5a2b2f;color:#ffc9c9;border-radius:12px;padding:12px 14px;
     font-size:12.5px;line-height:1.55;margin-top:16px;white-space:pre-wrap;word-break:break-word;text-align:left}
+
+  /* asking the lesson a question */
+  .Q-chat{max-height:38dvh;overflow-y:auto;padding:9px 13px 3px;border-top:1px solid var(--line);
+    -webkit-overflow-scrolling:touch}
+  .Q-chat:empty{display:none}
+  .Q-turn{display:flex;margin-bottom:9px}
+  .Q-turn.me{justify-content:flex-end}
+  .Q-bub{max-width:86%;border:1px solid var(--line);background:var(--surface-2);
+    border-radius:13px;padding:9px 11px;font-size:13.5px;line-height:1.6;word-break:break-word}
+  .Q-turn.me .Q-bub{background:#1b2b40;border-color:#31506f}
+  .Q-turn.err .Q-bub{background:#2a1618;border-color:#5a2b2f;color:#ffc9c9}
+  .Q-ko{color:var(--text);white-space:pre-wrap}
+  .Q-es{display:block;color:var(--es);font-weight:650;font-size:15px;margin:5px 0 2px;cursor:pointer}
+  .Q-tools{display:flex;gap:6px;margin-top:7px}
+  .Q-say,.Q-retry{border:1px solid var(--line);background:transparent;color:var(--dim);border-radius:8px;
+    padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit}
+  .Q-say:active,.Q-retry:active{background:var(--surface-2)}
+  .Q-wait{font-size:12.5px;color:var(--dim)}
+  .Q-ask{display:flex;align-items:center;gap:7px;padding:9px 13px;
+    border-top:1px solid var(--line);background:var(--surface)}
+  .Q-ask[hidden]{display:none}
+  .Q-in{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--line);color:var(--text);
+    border-radius:11px;padding:10px 12px;font-size:14px;font-family:inherit}
+  .Q-in:focus{outline:none;border-color:#3d4a5a}
+  .Q-mic,.Q-send{flex:none;border:1px solid var(--line);background:var(--surface-2);color:var(--muted);
+    border-radius:11px;padding:9px 12px;font-size:15px;cursor:pointer;font-family:inherit}
+  .Q-mic.rec{background:#7f1d2d;border-color:#a3263a;color:#fff}
+  .Q-send{background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;font-size:13px}
+  .Q-mic:disabled,.Q-send:disabled,.Q-in:disabled{opacity:.5;cursor:default}
 </style>
 </head>
 <body>
@@ -405,6 +434,13 @@
     <div class="L-ctl" id="lCtl"></div>
     <div class="L-notice" id="lNotice"></div>
     <div class="L-body" id="lBody"></div>
+    <div class="Q-chat" id="lChat"></div>
+    <div class="Q-ask" id="lAsk" hidden>
+      <input class="Q-in" id="lQ" type="text" placeholder="궁금한 걸 물어보세요"
+             autocomplete="off" spellcheck="false" enterkeyhint="send">
+      <button class="Q-mic" id="lQMic" type="button" aria-label="말로 질문">🎤</button>
+      <button class="Q-send" id="lQSend" type="button">질문</button>
+    </div>
     <div class="L-foot" id="lFoot"></div>
   </div>
 </dialog>

@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-30.2";
+const APP_VERSION = "2026-09-30.3";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -659,18 +659,40 @@ function stopRecording(){
   try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch (e) {}
 }
 
+/* Where the next finished recording goes. The lesson's question bar borrows
+   this recorder wholesale — same auto-stop, same level meter, same audio
+   encoding — and only the destination differs. One-shot on purpose: it is
+   cleared the moment a recording is handled, so a purpose can never leak into
+   whatever is recorded next. */
+let recTarget = "interpret";
+function setRecTarget(t){ recTarget = (t === "ask" || t === "discard") ? t : "interpret"; }
+
 async function onRecordingStopped(){
   const mime = baseMime(recorder && recorder.mimeType);
   const blob = new Blob(chunks, { type: mime });
   chunks = [];
+  const target = recTarget;
+  recTarget = "interpret";
+
+  /* the lesson screen was closed mid-question: throw the audio away rather than
+     hand it to the interpreter, which would translate it and log it as a turn */
+  if (target === "discard"){ resetMic(); return; }
 
   if (durationMs < MIN_SPEECH_MS || blob.size < 1000){
     setStatus("너무 짧습니다 — 다시 말해 주십시오");
     resetMic();
+    /* the lesson screen covers the page, so setStatus above is invisible there
+       and the question bar has to be told to unlock itself */
+    if (target === "ask" && typeof lessonAskTooShort === "function") lessonAskTooShort();
     return;
   }
 
   const b64 = await blobToBase64(blob);
+  if (target === "ask" && typeof lessonAskAudio === "function"){
+    resetMic();
+    await lessonAskAudio(b64, mime, durationMs);
+    return;
+  }
   await runInterpret({ kind: "audio", data: b64, mime: mime }, durationMs);
 }
 
@@ -933,15 +955,21 @@ const SUMMARY_PROMPT = [
 ].join("\n");
 
 /* genConfig is optional: the daily note keeps the cheap default, the audio
-   lesson asks for more reasoning because it writes grammar notes. */
-async function callPlain(systemInstr, userText, genConfig){
+   lesson asks for more reasoning because it writes grammar notes.
+
+   `input` is normally a string. The lesson's question bar passes the part array
+   the API also accepts, so a spoken question can be sent as audio without a
+   second copy of this function; `audioMs` then lets the audio tokens be
+   estimated the same way the interpreter estimates them. Existing callers pass
+   neither and behave exactly as before. */
+async function callPlain(systemInstr, input, genConfig, audioMs){
   const res = await fetch(API_URL, {
     method: "POST",
     headers: { "x-goog-api-key": settings.apiKey, "Content-Type": "application/json" },
     body: JSON.stringify({
       model: settings.model,
       system_instruction: systemInstr,
-      input: userText,
+      input: input,
       generation_config: genConfig || { temperature: 0.3, thinking_level: "low" }
     })
   });
@@ -954,7 +982,11 @@ async function callPlain(systemInstr, userText, genConfig){
   if (!text) throw new Error("정리 결과를 받지 못했습니다.\n" + raw.slice(0, 300));
   const u = readUsage(json);
   if (u){
-    addUsage(u.inTok, u.outTok, 0, computeCost(settings.model, u.inTok, u.outTok, 0));
+    /* the reply's own token count already covers the audio, so audTok is only
+       carved out of it for the meter's "음성" line — never added on top */
+    const audTok = audioMs ? Math.min(u.inTok, Math.round((audioMs / 1000) * AUDIO_TOKENS_PER_SEC)) : 0;
+    addUsage(u.inTok - audTok, u.outTok, audTok,
+             computeCost(settings.model, u.inTok - audTok, u.outTok, audTok));
     refreshMeter();
   }
   return text.trim();
