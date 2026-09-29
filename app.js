@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-30.4";
+const APP_VERSION = "2026-09-30.5";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -631,12 +631,21 @@ function stopLevelMeter(){
    for someone else to pick up. */
 let recSession = null;
 
-/* Abandon a question being recorded or converted. Marks only that session, so
-   a translation recording started meanwhile is never touched. */
+/* Every ask recording that has started and is not yet fully handled — recording
+   OR still converting. `recSession` alone cannot describe two at once: a second
+   question started while the first was still converting overwrote it, so
+   discarding reached only the newer one and the older one sailed through its
+   checks and was sent to a lesson screen that had been closed. A set can
+   describe all of them, and discarding marks all of them. */
+const askSessions = new Set();
+
+/* Abandon every question in flight, recording or converting. Translation
+   sessions are not in the set, so they are never touched. */
 function discardAskRecording(){
-  if (!recSession || recSession.target !== "ask") return false;
-  recSession.discarded = true;
-  if (recording) stopRecording();
+  if (!askSessions.size) return false;
+  askSessions.forEach((s) => { s.discarded = true; });
+  /* only the one actually holding the microphone needs stopping */
+  if (recording && recSession && recSession.target === "ask") stopRecording();
   return true;
 }
 
@@ -657,7 +666,13 @@ async function startRecording(target){
     recorder.onstop = onRecordingStopped;
     recorder.start();
 
-    recSession = { target: target === "ask" ? "ask" : "interpret", discarded: false };
+    recSession = { target: target === "ask" ? "ask" : "interpret", discarded: false, tag: null };
+    if (recSession.target === "ask"){
+      /* stamped with the lesson screen it was asked from, so the answer can only
+         ever be delivered back to that same screen */
+      if (typeof lessonAskTag === "function") recSession.tag = lessonAskTag();
+      askSessions.add(recSession);
+    }
     recording = true; sawSpeech = false; silentSince = 0; startedAt = Date.now();
     voicedMs = 0; pauses = 0; lastTick = 0; wasVoiced = false;
     el.mic.classList.add("rec");
@@ -689,12 +704,20 @@ async function onRecordingStopped(){
 
   /* A recording with no session predates this code path or arrived after a
      failed open; treating it as a translation is the old, safe default. */
-  const sess = recSession || { target: "interpret", discarded: false };
+  const sess = recSession || { target: "interpret", discarded: false, tag: null };
   /* released only once this recording is completely done with — the session has
      to stay reachable across the await below so the lesson can still abandon it */
-  const release = () => { if (recSession === sess) recSession = null; };
+  const release = () => {
+    askSessions.delete(sess);
+    if (recSession === sess) recSession = null;
+  };
 
   if (sess.discarded){ release(); resetMic(); return; }
+
+  /* The recording has ended; what follows is asynchronous. Telling the question
+     bar now is what stops it looking like it is still recording — that appearance
+     is how a tap meant as "stop" used to start a second question instead. */
+  if (sess.target === "ask" && typeof lessonAskConverting === "function") lessonAskConverting();
 
   if (durationMs < MIN_SPEECH_MS || blob.size < 1000){
     release();
@@ -702,7 +725,7 @@ async function onRecordingStopped(){
     resetMic();
     /* the lesson screen covers the page, so setStatus above is invisible there
        and the question bar has to be told to unlock itself */
-    if (sess.target === "ask" && typeof lessonAskTooShort === "function") lessonAskTooShort();
+    if (sess.target === "ask" && typeof lessonAskTooShort === "function") lessonAskTooShort(sess.tag);
     return;
   }
 
@@ -715,7 +738,7 @@ async function onRecordingStopped(){
     release();
     resetMic();
     const why = (e && e.message) ? String(e.message) : "녹음을 읽지 못했습니다.";
-    if (sess.target === "ask" && typeof lessonAskFailed === "function") lessonAskFailed(why);
+    if (sess.target === "ask" && typeof lessonAskFailed === "function") lessonAskFailed(why, sess.tag);
     else { showError(why); setStatus("녹음을 읽지 못했습니다"); }
     return;
   }
@@ -728,7 +751,9 @@ async function onRecordingStopped(){
 
   if (sess.target === "ask" && typeof lessonAskAudio === "function"){
     resetMic();
-    await lessonAskAudio(b64, mime, durationMs);
+    /* the tag goes with it: the question bar checks that the screen it was asked
+       from is still the screen in front of the user before spending anything */
+    await lessonAskAudio(b64, mime, durationMs, sess.tag);
     return;
   }
   await runInterpret({ kind: "audio", data: b64, mime: mime }, durationMs);

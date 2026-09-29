@@ -1371,8 +1371,12 @@ function mountLesson(rec, notice){
   current = { lesson: rec.lesson, blob: rec.mp3 || null, engine: rec.engine, date: rec.date,
               qa: Array.isArray(rec.qa) ? rec.qa : [] };
   /* a new lesson means a new conversation: nothing half-asked carries over, and
-     the cached answer audio belonged to the old lesson's turn numbers */
+     the cached answer audio belonged to the old lesson's turn numbers. The epoch
+     moves too, so a question still in flight from the previous mount cannot file
+     its answer against this one. */
+  askEpoch++;
   askPending = null;
+  askConverting = false;
   askAudioCache.clear();
   askShow(true);
   askLock("idle");
@@ -1469,13 +1473,42 @@ const ASK_TURNS = 6;           // how much of the conversation goes back with a 
 const ASK_KEEP = 40;           // how much is kept on the lesson record
 const ASK_TIMEOUT_MS = 60000;
 
-let askBusy = false;           // a question is in flight — the 연타 guard
+let askBusy = false;           // the answer is being fetched
+let askConverting = false;     // the recording has ended and is being encoded
 let askPending = null;         // the unsettled question, so it can be shown and retried
 let askRecording = false;      // this recording belongs to the question bar
 let askSpeaking = false;
 /* Answer audio is kept in memory only. It is regenerable, and writing a blob per
    answer into the lesson record would grow the store for no good reason. */
 const askAudioCache = new Map();
+
+/* One question at a time, from the moment the microphone opens until the answer
+   lands. The gap this closes is the conversion: it is asynchronous, and until
+   `askConverting` existed the bar still looked like it was recording, so a tap
+   meant as "stop" started a second question instead of ending the first. */
+const askOccupied = () => askBusy || askConverting || askRecording;
+
+/* Which lesson screen a question was asked from. A question is only ever
+   delivered back to the same one: the screen must still be open, showing the
+   same lesson record, and not have been re-mounted since. Everything else about
+   in-flight questions is a race waiting to be found — this is the one check that
+   makes a late or orphaned answer harmless whatever the race was. */
+let askEpoch = 0;
+function lessonAskTag(){
+  const dlg = $("lesson");
+  return {
+    epoch: askEpoch,
+    date: current ? current.date : null,
+    open: !!(dlg && dlg.open)
+  };
+}
+function askTagValid(tag){
+  if (!tag) return false;
+  const dlg = $("lesson");
+  if (!dlg || !dlg.open) return false;          // the screen was closed
+  if (!current) return false;
+  return tag.epoch === askEpoch && tag.date === current.date;
+}
 
 /* The lesson, compacted. Built from rows rather than from the original content
    because rows are what the record actually stores — so this works for lessons
@@ -1571,7 +1604,10 @@ function askLock(state){
   if (mic){
     mic.disabled = state === "think";
     mic.classList.toggle("rec", state === "rec");
-    mic.textContent = state === "rec" ? "■" : "🎤";
+    /* "think" gets its own face rather than a greyed-out microphone: the whole
+       reason a stray tap used to start a second question is that this button
+       still looked like a live microphone once the recording had ended */
+    mic.textContent = state === "rec" ? "■" : (state === "think" ? "…" : "🎤");
   }
 }
 
@@ -1740,6 +1776,11 @@ async function askAsk(pending){
   if (!current){ return; }
   if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
 
+  /* the screen this answer belongs to, so a reply that lands after the user has
+     closed the lesson or moved to another one is dropped instead of being filed
+     against whatever happens to be on screen by then */
+  const tag = lessonAskTag();
+
   askBusy = true;
   askLock("think");
   /* they stopped to ask about something — the lesson must not keep talking
@@ -1766,6 +1807,9 @@ async function askAsk(pending){
         ASK_TIMEOUT_MS))
     ]);
 
+    /* the answer arrived, but the screen may have moved on while it was coming */
+    if (!askTagValid(tag)){ askPending = null; return; }
+
     const got = askParse(reply);
     const shown = askPending.via === "voice"
       ? (got.heard || "🎤 음성 질문")
@@ -1779,19 +1823,23 @@ async function askAsk(pending){
     askRender();
     qaPersist();
   } catch (e) {
-    if (askPending){
+    /* an error painted onto a screen the user has left is noise, not news */
+    if (askPending && askTagValid(tag)){
       askPending.err = (e && e.message) ? String(e.message) : String(e);
       askRender();
+    } else {
+      askPending = null;
     }
   } finally {
     askBusy = false;
+    askConverting = false;
     askLock("idle");
   }
 }
 
 function askSend(){
   const q = $("lQ");
-  if (!q || askBusy) return;
+  if (!q || askOccupied()) return;
   const text = q.value.trim();
   if (!text) return;
   q.value = "";
@@ -1802,12 +1850,13 @@ function askSend(){
    the destination differs. The destination is handed to startRecording so that
    it belongs to that one recording session (see recSession in app.js). */
 async function askMic(){
-  if (askBusy) return;
-  if (recording){                       // a second tap ends the recording
-    if (askRecording) askLock("think");
-    stopRecording();
+  if (recording){
+    /* a second tap ends OUR recording; a translation that was already running
+       when the lesson opened is none of this button's business */
+    if (askRecording){ askLock("think"); stopRecording(); }
     return;
   }
+  if (askOccupied()) return;
   if (busy) return;
   if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
   if (player){ try { player.pause(); } catch (e) {} }
@@ -1821,20 +1870,35 @@ async function askMic(){
   }
 }
 
-/* called from app.js when a recording aimed at the question bar finishes */
-async function lessonAskAudio(b64, mime, ms){
+/* the recording ended; encoding it is asynchronous, so the bar stops looking
+   like a microphone and starts refusing new questions from here */
+function lessonAskConverting(){
   askRecording = false;
+  askConverting = true;
+  askLock("think");
+}
+
+/* called from app.js when a recording aimed at the question bar finishes */
+async function lessonAskAudio(b64, mime, ms, tag){
+  askRecording = false;
+  askConverting = false;
+  /* The screen this was asked from may be gone — closed, or showing a different
+     lesson. Sending anyway would bill for an answer nobody can see. This is the
+     gate that makes the whole class of in-flight races harmless. */
+  if (!askTagValid(tag)){ askLock("idle"); return; }
   await askAsk({ q: "", via: "voice", audio: { data: b64, mime: mime, ms: ms } });
 }
-function askVoiceError(msg){
+function askVoiceError(msg, tag){
   askRecording = false;
+  askConverting = false;
+  if (!askTagValid(tag)){ askLock("idle"); return; }
   askPending = { q: "🎤 음성 질문", via: "voice", canRetry: false, err: msg };
   askRender();
   askLock("idle");
 }
-function lessonAskTooShort(){ askVoiceError("너무 짧습니다 — 다시 말해 주십시오."); }
+function lessonAskTooShort(tag){ askVoiceError("너무 짧습니다 — 다시 말해 주십시오.", tag); }
 /* the recording could not be turned into something sendable */
-function lessonAskFailed(msg){ askVoiceError(msg || "녹음을 보내지 못했습니다."); }
+function lessonAskFailed(msg, tag){ askVoiceError(msg || "녹음을 보내지 못했습니다.", tag); }
 
 /* ---------------- the 🎧 button ---------------- */
 
@@ -2622,12 +2686,15 @@ async function lessonTestVoice(){
   const dlg = $("lesson");
   if (dlg) dlg.addEventListener("close", () => {
     stopPlayer();
-    /* A question still being recorded — or already stopped and still being
-       converted — is abandoned, not sent. discardAskRecording marks that one
-       session, so it holds through the conversion and cannot be inherited by
-       the next translation. */
+    /* Every question still in flight — recording or converting — is abandoned,
+       not sent: discardAskRecording marks all of them, so none can be inherited
+       by the next translation. The epoch moves as well, which is what stops an
+       answer already on its way from being filed against a reopened screen. */
     discardAskRecording();
+    askEpoch++;
     askRecording = false;
+    askConverting = false;
+    askPending = null;
     askLock("idle");
     try { window.speechSynthesis.cancel(); } catch (e) {}
   });
