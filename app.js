@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-30.6";
+const APP_VERSION = "2026-09-30.7";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -649,13 +649,51 @@ function discardAskRecording(){
   return true;
 }
 
+/* Hands the microphone back. Used when a recording is abandoned before it ever
+   started: ensureStream caches the stream, and leaving live tracks behind keeps
+   the browser's recording indicator lit for a recording nobody is making. */
+function releaseStream(){
+  if (!stream) return;
+  try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+  stream = null;
+}
+
 async function startRecording(target){
   if (busy || recording) return;
   if (!settings.apiKey){ openSettings(); return; }
   showError("");
 
+  /* The session is created and registered BEFORE the microphone is asked for.
+     Doing it afterwards meant the first-ever use — where the permission prompt
+     can sit on screen for as long as the user takes to read it — bound the
+     recording to whatever lesson was open when the stream finally arrived,
+     not the one the button was pressed on. A session that does not exist yet
+     also cannot be abandoned, so closing the lesson during the prompt did
+     nothing at all. */
+  const sess = { target: target === "ask" ? "ask" : "interpret", discarded: false, tag: null };
+  if (sess.target === "ask"){
+    /* stamped with the lesson screen it was asked from, so the answer can only
+       ever be delivered back to that same screen */
+    if (typeof lessonAskTag === "function") sess.tag = lessonAskTag();
+    askSessions.add(sess);
+  }
+  recSession = sess;
+  const drop = () => {
+    askSessions.delete(sess);
+    if (recSession === sess) recSession = null;
+  };
+
   try {
     const s = await ensureStream();
+
+    /* the lesson was closed, or another was opened, while the prompt was up */
+    if (sess.discarded){
+      drop();
+      releaseStream();
+      resetMic();
+      return;
+    }
+
     const mime = pickMime();
     const opts = mime ? { mimeType: mime, audioBitsPerSecond: AUDIO_BPS } : { audioBitsPerSecond: AUDIO_BPS };
     try { recorder = new MediaRecorder(s, opts); }
@@ -666,13 +704,6 @@ async function startRecording(target){
     recorder.onstop = onRecordingStopped;
     recorder.start();
 
-    recSession = { target: target === "ask" ? "ask" : "interpret", discarded: false, tag: null };
-    if (recSession.target === "ask"){
-      /* stamped with the lesson screen it was asked from, so the answer can only
-         ever be delivered back to that same screen */
-      if (typeof lessonAskTag === "function") recSession.tag = lessonAskTag();
-      askSessions.add(recSession);
-    }
     recording = true; sawSpeech = false; silentSince = 0; startedAt = Date.now();
     voicedMs = 0; pauses = 0; lastTick = 0; wasVoiced = false;
     el.mic.classList.add("rec");
@@ -681,7 +712,7 @@ async function startRecording(target){
     startLevelMeter(s);
     hardStop = setTimeout(() => { if (recording) stopRecording(); }, MAX_RECORD_MS);
   } catch (e) {
-    recSession = null;
+    drop();
     showError("마이크를 열지 못했습니다.\n" + (e && e.message ? e.message : e) +
       "\n\n주소가 https 로 시작해야 마이크가 열립니다. 브라우저 설정에서 이 사이트의 마이크 권한도 확인하십시오.");
     resetMic();
@@ -1270,13 +1301,43 @@ const secureCtx = location.protocol === "https:" ||
    user loses the sentence they were saying. */
 let swReg = null, reloadPending = false, reloading = false;
 
+/* Writes to IndexedDB that have not finished. lesson.js raises this around the
+   lesson store, so a reload cannot land between "the answer is on screen" and
+   "the answer is saved" and quietly lose it. Capped, because a wedged write must
+   not block updates for ever. */
+let savesInFlight = 0;
+let reloadWaitUntil = 0;
+const RELOAD_SAVE_WAIT_MS = 5000;
+function beginSave(){ savesInFlight++; }
+function endSave(){
+  if (savesInFlight > 0) savesInFlight--;
+  if (!savesInFlight) flushPendingReload();
+}
+
+function reloadHeld(){
+  if (recording || busy) return true;
+  if (savesInFlight > 0 && Date.now() < reloadWaitUntil) return true;
+  return false;
+}
+
 function reloadForUpdate(){
   if (reloading) return;
-  if (recording || busy){ reloadPending = true; setStatus("업데이트 준비됨 — 이 문장 끝나면 적용됩니다"); return; }
+  /* the deadline is set on the first refusal, so waiting is bounded from the
+     moment the update actually wanted to land */
+  if (!reloadPending && savesInFlight > 0) reloadWaitUntil = Date.now() + RELOAD_SAVE_WAIT_MS;
+  if (reloadHeld()){
+    reloadPending = true;
+    setStatus(savesInFlight > 0 && !recording && !busy
+      ? "업데이트 준비됨 — 저장이 끝나면 적용됩니다"
+      : "업데이트 준비됨 — 이 문장 끝나면 적용됩니다");
+    /* nothing else will wake this up if the write never finishes */
+    setTimeout(flushPendingReload, RELOAD_SAVE_WAIT_MS + 50);
+    return;
+  }
   reloading = true;
   location.reload();
 }
-function flushPendingReload(){ if (reloadPending && !recording && !busy) reloadForUpdate(); }
+function flushPendingReload(){ if (reloadPending && !reloadHeld()) reloadForUpdate(); }
 
 if ("serviceWorker" in navigator && secureCtx){
   navigator.serviceWorker.addEventListener("controllerchange", reloadForUpdate);

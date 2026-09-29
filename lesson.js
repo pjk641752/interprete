@@ -852,13 +852,17 @@ function rq2p(rq){
 }
 
 async function lessonSave(rec){
-  const db = await openDb();
+  /* an automatic update must not reload the page out from under this */
+  beginSave();
   try {
-    await rq2p(lessonStore(db,"readwrite").put(rec));
-    const all = await rq2p(lessonStore(db,"readonly").getAll());
-    all.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
-    for (const old of all.slice(KEEP_LESSONS)) await rq2p(lessonStore(db,"readwrite").delete(old.date));
-  } finally { db.close(); }
+    const db = await openDb();
+    try {
+      await rq2p(lessonStore(db,"readwrite").put(rec));
+      const all = await rq2p(lessonStore(db,"readonly").getAll());
+      all.sort((a, b) => String(b.createdAt).localeCompare(String(a.createdAt)));
+      for (const old of all.slice(KEEP_LESSONS)) await rq2p(lessonStore(db,"readwrite").delete(old.date));
+    } finally { db.close(); }
+  } finally { endSave(); }
 }
 async function lessonList(){
   const db = await openDb();
@@ -1369,6 +1373,10 @@ function lessonNotice(text){
 function mountLesson(rec, notice){
   stopPlayer();
   current = { lesson: rec.lesson, blob: rec.mp3 || null, engine: rec.engine, date: rec.date,
+              /* the record's own identity, not just its date: 다시 만들기 keeps the
+                 date and replaces the record, so a save aimed at the old record
+                 must be able to notice that it is gone */
+              createdAt: rec.createdAt || "",
               qa: Array.isArray(rec.qa) ? rec.qa : [] };
   /* a new lesson means a new conversation: nothing half-asked carries over, and
      the cached answer audio belonged to the old lesson's turn numbers. The epoch
@@ -1499,6 +1507,9 @@ function lessonAskTag(){
   return {
     epoch: askEpoch,
     date: current ? current.date : null,
+    /* the record's createdAt, which a regenerated lesson changes even though its
+       date stays the same */
+    createdAt: current ? (current.createdAt || "") : "",
     open: !!(dlg && dlg.open)
   };
 }
@@ -1507,7 +1518,9 @@ function askTagValid(tag){
   const dlg = $("lesson");
   if (!dlg || !dlg.open) return false;          // the screen was closed
   if (!current) return false;
-  return tag.epoch === askEpoch && tag.date === current.date;
+  if (tag.date !== current.date) return false;  // a different lesson
+  if ((tag.createdAt || "") !== (current.createdAt || "")) return false;  // re-made
+  return tag.epoch === askEpoch;
 }
 
 /* The lesson, compacted. Built from rows rather than from the original content
@@ -1771,19 +1784,28 @@ async function qaPersist(turns, tag){
   /* copied per turn, so later edits to current.qa cannot reach a write that is
      already on its way */
   const snap = turns.map((t) => ({ q: t.q, via: t.via, parts: t.parts, at: t.at }));
+  /* an automatic update must not reload between the answer appearing and the
+     answer being saved */
+  beginSave();
   try {
     const db = await openDb();
     try {
       const rec = await rq2p(lessonStore(db, "readonly").get(tag.date));
       if (!rec) return;
       if (!askTagValid(tag)) return;          // the screen moved on mid-lookup
+      /* The record itself must still be the one this answer belongs to. get and
+         put are separate transactions, so a lesson regenerated in between would
+         otherwise be overwritten by this whole-record put — the new lesson would
+         be replaced on disk by the old one plus an answer. createdAt is stamped
+         once per record, so a mismatch means the record was replaced. */
+      if ((rec.createdAt || "") !== (tag.createdAt || "")) return;
       rec.qa = snap;
       await rq2p(lessonStore(db, "readwrite").put(rec));
     } finally { db.close(); }
   } catch (e) {
     /* the answer is already on screen; losing only its history is not worth
        interrupting the lesson for */
-  }
+  } finally { endSave(); }
 }
 
 /* ---- asking ---- */
@@ -1887,6 +1909,21 @@ async function askMic(){
     askRecording = false;
     askLock("idle");
   }
+}
+
+/* Making a lesson REPLACES the record the screen is showing, so it counts as a
+   lesson change even though the date and the open dialog stay the same. Every
+   question in flight belongs to the lesson about to be replaced: its answer must
+   reach neither the screen nor the store. Moving the epoch here is what makes the
+   existing gate refuse a late answer, instead of it landing on — and reverting —
+   the lesson that was just built. */
+function askAbandonForNewLesson(){
+  discardAskRecording();
+  askEpoch++;
+  askRecording = false;
+  askConverting = false;
+  askPending = null;
+  askLock("idle");
 }
 
 /* the recording ended; encoding it is asynchronous, so the bar stops looking
@@ -1994,6 +2031,10 @@ async function makeLessonRun(rows){
     }
   }
 
+  /* the record this screen is showing is about to be replaced — see the comment
+     on askAbandonForNewLesson */
+  askAbandonForNewLesson();
+
   lessonCancelled = false;
   busy = true;
   /* nothing between `busy = true` and this try: a throw in the setup below
@@ -2094,6 +2135,11 @@ async function makeLessonRun(rows){
 
 /* ---------------- past lessons ---------------- */
 
+/* Which past-lesson tap is the live one. IndexedDB reads finish in whatever
+   order they like, so tapping A then B could mount A last and leave the user
+   looking at the lesson they did not pick. Only the newest tap may mount. */
+let pastPick = 0;
+
 async function showPast(){
   let all = [], listErr = null;
   try { all = await lessonList(); } catch (e) { listErr = e; }
@@ -2120,9 +2166,13 @@ async function showPast(){
     $("lBody").innerHTML = html;
     $("lBody").querySelectorAll(".L-row.past").forEach((b) => {
       b.onclick = () => {
+        const mine = ++pastPick;
         lessonLoad(b.getAttribute("data-d"))
-          .then((rec) => { if (rec) mountLesson(rec); })
-          .catch((e) => lessonNotice("그 수업을 열지 못했습니다.\n" + ((e && e.message) || e)));
+          .then((rec) => { if (mine === pastPick && rec) mountLesson(rec); })
+          .catch((e) => {
+            if (mine !== pastPick) return;      // a later tap already won
+            lessonNotice("그 수업을 열지 못했습니다.\n" + ((e && e.message) || e));
+          });
       };
     });
   }
