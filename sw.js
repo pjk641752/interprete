@@ -1,7 +1,7 @@
 /* Interpreter PWA service worker.
    Caches only the app shell. API calls always go to the network. */
 
-const CACHE = "interp-shell-v16";
+const CACHE = "interp-shell-v17";
 const SHELL = [
   "./",
   "./index.html",

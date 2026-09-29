@@ -829,6 +829,16 @@ async function lessonSynthesize(lesson, onProgress, onPhase){
 
 const DB_NAME = "interp.lessons", DB_STORE = "lessons";
 
+/* A record's identity, and the thing a save compares itself against. The plain
+   timestamp was not enough: two records made in the same millisecond — two tabs,
+   or a quick 다시 만들기 — carried the same signature, so a save aimed at one
+   could land on the other. The random tail makes it unique; the comparison is
+   still a whole-string match, so nothing downstream changes. It still sorts by
+   time, because the ISO prefix is fixed width and comes first. */
+function lessonStamp(){
+  return new Date().toISOString() + "-" + Math.random().toString(36).slice(2, 8);
+}
+
 function openDb(){
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) return reject(new Error("이 브라우저는 저장을 지원하지 않습니다."));
@@ -1776,13 +1786,17 @@ async function askSpeak(i, btn){
    re-read from `current` afterwards. Reading the global after the await was the
    bug: the lookup for lesson A could still be in flight when the user opened
    lesson B, and the write then put B's questions onto A's record. The turns are
-   copied, the record is fetched by the tag's own date, and the tag is checked
-   once more immediately before the put — a lesson re-made in the meantime is a
-   different record, and stale history must not land on it. */
+   copied, the record is fetched by the tag's own date, and the read and the write
+   share one transaction so nothing can be squeezed between them — a lesson
+   re-made in the meantime is a different record, and stale history must not land
+   on it. */
 async function qaPersist(turns, tag){
   if (!tag || !tag.date || !Array.isArray(turns)) return;
   /* copied per turn, so later edits to current.qa cannot reach a write that is
      already on its way */
+  /* The screen check reads the DOM and module state, so it belongs outside the
+     transaction and is done once, here. */
+  if (!askTagValid(tag)) return;
   const snap = turns.map((t) => ({ q: t.q, via: t.via, parts: t.parts, at: t.at }));
   /* an automatic update must not reload between the answer appearing and the
      answer being saved */
@@ -1790,17 +1804,24 @@ async function qaPersist(turns, tag){
   try {
     const db = await openDb();
     try {
-      const rec = await rq2p(lessonStore(db, "readonly").get(tag.date));
+      /* ONE readwrite transaction for the read AND the write. Two transactions
+         left a gap wide enough for another tab to put a new record for this date
+         into, and this whole-record put would then overwrite that new lesson with
+         the old one plus an answer. IndexedDB serialises overlapping readwrite
+         transactions on the same store, so nothing can land in between.
+
+         The only await between the get and the put is the get's own request:
+         awaiting anything else here would let the transaction go inactive and
+         commit early. */
+      const tx = db.transaction(DB_STORE, "readwrite");
+      const store = tx.objectStore(DB_STORE);
+      const rec = await rq2p(store.get(tag.date));
       if (!rec) return;
-      if (!askTagValid(tag)) return;          // the screen moved on mid-lookup
-      /* The record itself must still be the one this answer belongs to. get and
-         put are separate transactions, so a lesson regenerated in between would
-         otherwise be overwritten by this whole-record put — the new lesson would
-         be replaced on disk by the old one plus an answer. createdAt is stamped
-         once per record, so a mismatch means the record was replaced. */
+      /* the record must still be the one this answer belongs to; createdAt is
+         stamped once per record, so a mismatch means it was replaced */
       if ((rec.createdAt || "") !== (tag.createdAt || "")) return;
       rec.qa = snap;
-      await rq2p(lessonStore(db, "readwrite").put(rec));
+      await rq2p(store.put(rec));
     } finally { db.close(); }
   } catch (e) {
     /* the answer is already on screen; losing only its history is not worth
@@ -2073,7 +2094,7 @@ async function makeLessonRun(rows){
     if (!blob) lessonEstimate(lesson);
 
     const rec = {
-      date: lesson.date, createdAt: new Date().toISOString(),
+      date: lesson.date, createdAt: lessonStamp(),
       engine: blob ? "cloud" : "device", lesson: lesson, mp3: blob,
       qa: []                         // questions asked about this lesson
     };
