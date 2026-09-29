@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-30.1";
+const APP_VERSION = "2026-09-30.2";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 

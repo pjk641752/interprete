@@ -629,7 +629,12 @@ async function ttsEnsureVoices(){
    for again at the voice's own speed. The slow read then simply is not slow,
    and the notice says so — which beats failing the whole lesson over it. */
 let ttsRateRefused = false;
-const RATE_REFUSED = /speaking_?rate|audio_?config|not supported|unsupported|invalid/i;
+/* Deliberately narrow: it must name the speaking rate. The first version also
+   matched "audio_config", "not supported" and bare "invalid", which any
+   run-of-the-mill 400 (a bad voice name, "Invalid value at ...") satisfies —
+   one such error would have latched ttsRateRefused and silently turned the
+   slow read off for the rest of the run. */
+const RATE_REFUSED = /speaking[_\s-]?rate/i;
 
 async function ttsSay(text, side, rate){
   const name = side === "es" ? lset.voiceEs : lset.voiceKo;
@@ -1063,11 +1068,20 @@ const NO_ES_VOICE =
    so on screen. */
 function devicePlayer(lesson, onTick){
   let idx = 0, alive = true, running = false, rate = 1, waitTimer = null;
-  /* Picked once, here, rather than per line: the list can change under us and
-     a lesson that swaps voices halfway is worse than one slightly stale pick. */
+  /* Picked once and then frozen: a lesson that swaps voices halfway is worse
+     than one slightly stale pick. The late list from voiceschanged is only
+     allowed to fill in an empty pick, and only until the first line is
+     spoken — after that `voicesFixed` shuts the door, because the engine can
+     fire voiceschanged at any time and would otherwise change the reader
+     mid-sentence. */
   let voices = devVoicePair(devVoiceList());
-  if (!voices.es || !voices.ko){
-    devVoicesReady().then((list) => { if (alive) voices = devVoicePair(list); }).catch(() => {});
+  let voicesFixed = !!(voices.es && voices.ko);
+  if (!voicesFixed){
+    devVoicesReady().then((list) => {
+      if (!alive || voicesFixed) return;
+      voices = devVoicePair(list);
+      voicesFixed = true;
+    }).catch(() => {});
   }
   /* speechSynthesis.cancel() delivers onend/onerror asynchronously, so a
      cancelled line can report finishing AFTER a seek has already started the
@@ -1109,6 +1123,7 @@ function devicePlayer(lesson, onTick){
     };
     try {
       const u = new SpeechSynthesisUtterance(s.text);
+      voicesFixed = true;            // from the first line on, the pick is final
       const pick = s.speaker === "es" ? voices.es : voices.ko;
       u.lang = s.speaker === "es" ? "es-MX" : "ko-KR";
       /* naming the voice is what stops the engine reading Spanish with
@@ -1222,6 +1237,9 @@ function highlight(i){
 function renderTransport(){
   const l = current.lesson;
   const isDev = current.engine === "device";
+  /* the elements onTick paints are about to be replaced, so what it last
+     painted onto the old ones no longer says anything about the new ones */
+  resetTickCache();
   $("lCtl").innerHTML =
     '<div class="L-bar" id="lBar"><i></i></div>' +
     '<div class="L-time"><span id="lAt">0:00</span><span>' + fmtClock(l.totalMs) + "</span></div>" +
@@ -1280,20 +1298,41 @@ function renderFoot(){
       ? " · 이번 달 음성 " + lset.chars.n.toLocaleString("ko-KR") + "자" : "");
 }
 
+/* Last values painted, so a tick that changes nothing costs nothing. onTick
+   runs on every animation frame now (~60Hz): re-parsing the play button's
+   innerHTML, re-setting the same width string and re-assigning
+   mediaSession.playbackState sixty times a second is all wasted work on a
+   phone. Reset by renderTransport, which rebuilds these elements. */
+let tickClock = null, tickPct = null, tickPlaying = null;
+function resetTickCache(){ tickClock = null; tickPct = null; tickPlaying = null; }
+
 function onTick(ms, playing){
   if (!current) return;
   highlight(rowAt(current.lesson.rows, ms));
-  const at = $("lAt");
-  if (at) at.textContent = fmtClock(ms);
-  const bar = $("lBar");
-  if (bar && bar.firstChild){
-    bar.firstChild.style.width =
-      Math.min(100, current.lesson.totalMs ? (ms / current.lesson.totalMs) * 100 : 0) + "%";
+
+  const clock = fmtClock(ms);
+  if (clock !== tickClock){
+    const at = $("lAt");
+    if (at) at.textContent = clock;
+    tickClock = clock;
   }
-  const p = $("lPlay");
-  if (p) p.innerHTML = playing ? "&#10073;&#10073;" : "&#9654;";
-  if ("mediaSession" in navigator){
-    try { navigator.mediaSession.playbackState = playing ? "playing" : "paused"; } catch (e) {}
+
+  /* a tenth of a percent is below one pixel on any real bar */
+  const pct = Math.round(
+    Math.min(100, current.lesson.totalMs ? (ms / current.lesson.totalMs) * 100 : 0) * 10) / 10;
+  if (pct !== tickPct){
+    const bar = $("lBar");
+    if (bar && bar.firstChild) bar.firstChild.style.width = pct + "%";
+    tickPct = pct;
+  }
+
+  if (playing !== tickPlaying){
+    const p = $("lPlay");
+    if (p) p.innerHTML = playing ? "&#10073;&#10073;" : "&#9654;";
+    if ("mediaSession" in navigator){
+      try { navigator.mediaSession.playbackState = playing ? "playing" : "paused"; } catch (e) {}
+    }
+    tickPlaying = playing;
   }
 }
 
@@ -1354,6 +1393,7 @@ function mountLesson(rec, notice){
 
 function lessonMessage(title, sub, extraHtml){
   $("lCtl").innerHTML = "";
+  resetTickCache();                 // the transport this cache described is gone
   lessonNotice("");
   $("lBody").innerHTML = '<div class="L-busy"><div class="L-busy-t">' + esc(title) + "</div>" +
     '<div class="L-busy-s">' + esc(sub || "") + "</div>" + (extraHtml || "") + "</div>";
@@ -1400,7 +1440,29 @@ async function openLesson(force){
   }
 }
 
+/* Raised synchronously, before makeLessonRun reaches its first await, and
+   lowered only when the whole run is over.
+
+   `busy` cannot do this on its own. The voice-list check below can wait over a
+   second, and `busy` is not raised until after it, so two taps of 다시 시도
+   inside that window each got past `if (!busy)` and started a lesson: two
+   Gemini scripts, two sets of paid TTS requests, and two players fighting over
+   one screen. The guard has to be set before the first await for that window
+   to close at all — which is why this wrapper exists rather than a flag set
+   further down. */
+let lessonMaking = false;
+
 async function makeLesson(rows){
+  if (busy || lessonMaking){ setStatus("아직 하던 일이 끝나지 않았습니다"); return; }
+  lessonMaking = true;
+  try {
+    await makeLessonRun(rows);
+  } finally {
+    lessonMaking = false;
+  }
+}
+
+async function makeLessonRun(rows){
   /* Asked BEFORE anything is written, because the script costs Gemini money:
      on a device with no Spanish voice the whole lesson would be read in the
      wrong accent, and the user should get to turn Cloud TTS on first rather
@@ -1467,13 +1529,23 @@ async function makeLesson(rows){
                  "앱을 닫으면 사라지고 다시 만들어야 합니다. 저장 공간을 확인하십시오.";
     }
 
+    /* Warmed, not read raw. On the cloud-failed-so-fall-back-to-device path
+       nothing has asked for the voice list yet, and Chrome answers the first
+       call with an empty array — so a phone that does have Spanish would have
+       been told it does not. */
+    let noEsVoice = false;
+    if (!blob){
+      const devList = await devVoicesReady().catch(() => []);
+      noEsVoice = devList.length > 0 && !devPickVoice("es", devList);
+    }
+
     const notice = [
       fellBack ? "고품질 음성을 만들지 못해 기기 음성으로 수업을 만들었습니다.\n" + fellBack : "",
       /* the docs disagree about this voice family and speed; if the API refused
          the slow read, say so rather than let it look like a bug */
       blob && ttsRateRefused
         ? "이 음성은 «느리게 읽기» 를 지원하지 않아, 느린 문장도 보통 속도로 읽습니다." : "",
-      !blob && !devPickVoice("es", devVoiceList()) ? NO_ES_VOICE : "",
+      noEsVoice ? NO_ES_VOICE : "",
       saveNote
     ].filter(Boolean).join("\n\n");
 
@@ -1487,7 +1559,15 @@ async function makeLesson(rows){
     } else {
       lessonMessage("수업을 만들지 못했습니다.", "", '<div class="L-err">' + esc(msg) + "</div>");
       $("lFoot").innerHTML = '<button class="mini" id="lRetry" type="button">다시 시도</button>';
-      $("lRetry").onclick = () => { if (!busy) makeLesson(rows); };
+      /* no `if (!busy)` here any more: that test was the hole — it passed for
+         both of two quick taps. makeLesson's own guard is the authority, and
+         the button is disabled on the way in so the second tap does nothing
+         even before the call is made */
+      $("lRetry").onclick = (ev) => {
+        const b = ev.currentTarget;
+        if (b) b.disabled = true;
+        makeLesson(rows).finally(() => { if (b && b.isConnected) b.disabled = false; });
+      };
       setStatus("수업 만들기에 실패했습니다");
     }
   } finally {
@@ -1681,9 +1761,18 @@ function exportHtml(lesson, b64){
 'var barEl = document.getElementById("bar"), atEl = document.getElementById("at");',
 'var playEl = document.getElementById("play"), spdEl = document.getElementById("spd");',
 'var STEPS = [0.8, 1, 1.2], P = null;',
-'var tick = function(ms, on){ mark(rowAt(ms)); atEl.textContent = clock(ms);',
-'  barEl.firstChild.style.width = (D.totalMs ? Math.min(100, ms/D.totalMs*100) : 0) + "%";',
-'  playEl.innerHTML = on ? "&#10073;&#10073;" : "&#9654;"; };',
+'/* tick runs once per animation frame, so nothing is written unless it changed:',
+'   re-parsing innerHTML and re-setting the same width string 60 times a second',
+'   is pure waste on a phone. */',
+'var lastC = null, lastP = null, lastOn = null;',
+'var tick = function(ms, on){',
+'  mark(rowAt(ms));',
+'  var c = clock(ms);',
+'  if (c !== lastC){ atEl.textContent = c; lastC = c; }',
+'  var pc = Math.round((D.totalMs ? Math.min(100, ms/D.totalMs*100) : 0) * 10) / 10;',
+'  if (pc !== lastP){ barEl.firstChild.style.width = pc + "%"; lastP = pc; }',
+'  if (on !== lastOn){ playEl.innerHTML = on ? "&#10073;&#10073;" : "&#9654;"; lastOn = on; }',
+'};',
 '',
 'if (D.hasAudio){',
 '  var b64 = document.getElementById("A").textContent.replace(/\\s/g, "");',
@@ -1883,7 +1972,7 @@ function lessonSaveSettings(){
   lpersist();
 }
 
-let testAudio = null;
+let testAudio = null, testUrl = "";
 
 /* ---- 시험 듣기 ---- */
 
@@ -1892,106 +1981,154 @@ const PREVIEW_TEXT = {
   ko: "안녕하세요. 오늘 수업을 시작하겠습니다."
 };
 /* One line per voice is billed once and then replayed from here: the point of
-   the button is to compare voices, and comparing should not cost per press. */
+   the button is to compare voices, and comparing should not cost per press.
+   Capped, because the map would otherwise hold every voice ever auditioned —
+   each one a few tens of kB of mp3 — for the life of the page. */
 const previewCache = new Map();
+const PREVIEW_CACHE_MAX = 8;
+
+function previewRemember(name, blob){
+  previewCache.delete(name);                       // re-insert so it counts as newest
+  previewCache.set(name, blob);
+  while (previewCache.size > PREVIEW_CACHE_MAX){
+    previewCache.delete(previewCache.keys().next().value);
+  }
+}
+
+/* Only the three voice buttons touch this; they share one global `lset`, so
+   two of them running at once would interleave their snapshot/restore and one
+   would put back what the other had just changed. */
+let voiceBusy = false;
+function voiceBtns(disabled){
+  for (const id of ["lTestVoice", "lTryEs", "lTryKo"]){
+    const b = $(id);
+    if (b) b.disabled = disabled;
+  }
+}
 
 function previewPlay(blob){
-  const url = URL.createObjectURL(blob);
+  /* pressing a second time before the first finished used to leak the first
+     object URL: the audio was paused but the URL was never revoked */
   if (testAudio){ try { testAudio.pause(); } catch (e) {} }
+  if (testUrl){ try { URL.revokeObjectURL(testUrl); } catch (e) {} testUrl = ""; }
+
+  const url = URL.createObjectURL(blob);
+  testUrl = url;
   const a = new Audio(url);
   testAudio = a;
-  const done = () => { URL.revokeObjectURL(url); if (testAudio === a) testAudio = null; };
+  const done = () => {
+    if (testUrl === url){ try { URL.revokeObjectURL(url); } catch (e) {} testUrl = ""; }
+    if (testAudio === a) testAudio = null;
+  };
   a.onended = done;
   a.onerror = done;
   a.play().catch(done);
 }
 
+/* Everything the voice buttons are allowed to change, so it can be put back
+   exactly. Auditioning is not saving: only the 저장 button may persist. */
+function voiceSnapshot(){
+  return { ttsKey: lset.ttsKey, sexEs: lset.sexEs, sexKo: lset.sexKo,
+           voiceEs: lset.voiceEs, voiceEsCode: lset.voiceEsCode,
+           voiceKo: lset.voiceKo, voiceKoCode: lset.voiceKoCode };
+}
+/* `chars` is deliberately outside the snapshot: a preview that really was
+   synthesised really was billed, and that count must survive the restore. */
+function voiceRestore(snap){
+  Object.assign(lset, snap);
+  lpersist();
+}
+/* the dialog's own values, which may differ from what is stored */
+function voiceApplyDialog(key){
+  lset.ttsKey = key;
+  if ($("lSexEs")) lset.sexEs = $("lSexEs").value === "male" ? "male" : "female";
+  if ($("lSexKo")) lset.sexKo = $("lSexKo").value === "male" ? "male" : "female";
+  lset.voiceEs = ""; lset.voiceEsCode = ""; lset.voiceKo = ""; lset.voiceKoCode = "";
+}
+
 async function lessonPreview(side){
   const msg = $("lVoiceMsg");
-  if (!msg) return;
+  if (!msg || voiceBusy) return;
   const text = PREVIEW_TEXT[side];
+
+  voiceBusy = true;
+  voiceBtns(true);
+  msg.dataset.busy = "1";
 
   /* whichever engine the dialog is currently set to, not whichever was saved */
   const wantCloud = $("lEngine") && $("lEngine").value === "cloud";
   const key = $("lTtsKey") ? $("lTtsKey").value.trim() : "";
+  /* Put back no matter how this ends, success included: auditioning a voice
+     must never be what writes settings — only 저장 does that. */
+  const snap = voiceSnapshot();
 
-  if (!wantCloud || !key){
-    const list = await devVoicesReady().catch(() => []);
-    const v = devPickVoice(side, list);
-    if (!v){
-      msg.textContent = side === "es"
-        ? "이 기기에는 스페인어 목소리가 없습니다. 고품질 음성을 켜시는 것을 권합니다."
-        : "이 기기에는 한국어 목소리가 없습니다.";
+  try {
+    if (!wantCloud || !key){
+      const list = await devVoicesReady().catch(() => []);
+      const v = devPickVoice(side, list);
+      if (!v){
+        msg.textContent = side === "es"
+          ? "이 기기에는 스페인어 목소리가 없습니다. 고품질 음성을 켜시는 것을 권합니다."
+          : "이 기기에는 한국어 목소리가 없습니다.";
+        return;
+      }
+      /* the device pick IS remembered — it is a property of this phone, not of
+         an unsaved dialog, and nothing is billed for it */
+      devVoicePair(list);
+      try {
+        window.speechSynthesis.cancel();
+        const u = new SpeechSynthesisUtterance(text);
+        u.voice = v; u.lang = v.lang || (side === "es" ? "es-MX" : "ko-KR");
+        window.speechSynthesis.speak(u);
+        msg.textContent = "기기 음성: " + v.name;
+      } catch (e) { msg.textContent = "기기 음성을 재생하지 못했습니다."; }
       return;
     }
-    devVoicePair(list);
+
+    voiceApplyDialog(key);
+    msg.textContent = "듣는 중…";
     try {
-      window.speechSynthesis.cancel();
-      const u = new SpeechSynthesisUtterance(text);
-      u.voice = v; u.lang = v.lang || (side === "es" ? "es-MX" : "ko-KR");
-      window.speechSynthesis.speak(u);
-      msg.textContent = "기기 음성: " + v.name;
-    } catch (e) { msg.textContent = "기기 음성을 재생하지 못했습니다."; }
-    return;
-  }
+      const lame = await loadLame();
+      await ttsEnsureVoices();
+      const name = side === "es" ? lset.voiceEs : lset.voiceKo;
 
-  /* the dialog can be dismissed without saving, so work on a copy and only
-     keep what actually worked — same rule as 음성 확인 below */
-  const before = { ttsKey: lset.ttsKey, sexEs: lset.sexEs, sexKo: lset.sexKo,
-                   voiceEs: lset.voiceEs, voiceEsCode: lset.voiceEsCode,
-                   voiceKo: lset.voiceKo, voiceKoCode: lset.voiceKoCode };
-  lset.ttsKey = key;
-  if ($("lSexEs")) lset.sexEs = $("lSexEs").value === "male" ? "male" : "female";
-  if ($("lSexKo")) lset.sexKo = $("lSexKo").value === "male" ? "male" : "female";
-  /* the gender in the dialog may differ from the one the stored pick was made
-     for, so the pick is redone for this preview */
-  lset.voiceEs = ""; lset.voiceEsCode = ""; lset.voiceKo = ""; lset.voiceKoCode = "";
-
-  msg.dataset.busy = "1";
-  msg.textContent = "듣는 중…";
-  try {
-    const lame = await loadLame();
-    await ttsEnsureVoices();
-    const name = side === "es" ? lset.voiceEs : lset.voiceKo;
-
-    let blob = previewCache.get(name);
-    if (!blob){
-      const got = await ttsSay(text, side, 1);
-      addTtsChars(text.length);
-      const w = mp3Writer(lame, got.sr);
-      w.write(got.pcm);
-      blob = w.finish();
-      previewCache.set(name, blob);
+      let blob = previewCache.get(name);
+      if (!blob){
+        const got = await ttsSay(text, side, 1);
+        addTtsChars(text.length);
+        const w = mp3Writer(lame, got.sr);
+        w.write(got.pcm);
+        blob = w.finish();
+        previewRemember(name, blob);
+      }
+      previewPlay(blob);
+      msg.textContent = name;
+    } catch (e) {
+      msg.textContent = (e && e.message) ? String(e.message).split("\n")[0] : "들어보지 못했습니다.";
     }
-    previewPlay(blob);
-    msg.textContent = name;
-  } catch (e) {
-    /* ttsEnsureVoices persists as soon as it has picked, so a failure after
-       that point would leave storage holding a key the user never saved:
-       put the old values back on disk as well as in memory */
-    Object.assign(lset, before);
-    lpersist();
-    msg.textContent = (e && e.message) ? String(e.message).split("\n")[0] : "들어보지 못했습니다.";
   } finally {
+    /* ttsEnsureVoices persists the moment it picks, so this has to undo disk
+       as well as memory — on the way out of every path, not just the failures */
+    if (wantCloud && key) voiceRestore(snap);
     delete msg.dataset.busy;
+    voiceBtns(false);
+    voiceBusy = false;
   }
 }
 
 async function lessonTestVoice(){
   const msg = $("lVoiceMsg");
-  if (!msg) return;
+  if (!msg || voiceBusy) return;
   const key = $("lTtsKey").value.trim();
   if (!key){ msg.textContent = "키를 먼저 넣어주십시오."; return; }
 
+  voiceBusy = true;
+  voiceBtns(true);
   /* The dialog can still be dismissed without saving, so the test must not be
-     what writes settings. Work on a copy and only keep it if it worked. */
-  const before = { ttsKey: lset.ttsKey, sexEs: lset.sexEs, sexKo: lset.sexKo,
-                   voiceEs: lset.voiceEs, voiceEsCode: lset.voiceEsCode,
-                   voiceKo: lset.voiceKo, voiceKoCode: lset.voiceKoCode };
-  lset.ttsKey = key;
-  if ($("lSexEs")) lset.sexEs = $("lSexEs").value === "male" ? "male" : "female";
-  if ($("lSexKo")) lset.sexKo = $("lSexKo").value === "male" ? "male" : "female";
-  lset.voiceEs = ""; lset.voiceEsCode = ""; lset.voiceKo = ""; lset.voiceKoCode = "";
+     what writes settings — not even when it succeeds. Work on a copy and put
+     the copy back on the way out; 저장 is the only thing that persists. */
+  const snap = voiceSnapshot();
+  voiceApplyDialog(key);
   msg.dataset.busy = "1";
   msg.textContent = "확인 중…";
 
@@ -1999,26 +2136,29 @@ async function lessonTestVoice(){
     const lame = await loadLame();
     await ttsEnsureVoices();
     const text = PREVIEW_TEXT.es;
+    /* read before the restore puts the old names back */
+    const esName = lset.voiceEs, koName = lset.voiceKo;
 
-    let blob = previewCache.get(lset.voiceEs);
+    let blob = previewCache.get(esName);
     if (!blob){
       const got = await ttsSay(text, "es", 1);
       addTtsChars(text.length);
       const w = mp3Writer(lame, got.sr);
       w.write(got.pcm);
       blob = w.finish();
-      previewCache.set(lset.voiceEs, blob);
+      previewRemember(esName, blob);
     }
     previewPlay(blob);
 
-    msg.textContent = "정상입니다. " + lset.voiceEs + " / " + lset.voiceKo;
+    msg.textContent = "정상입니다. " + esName + " / " + koName;
     if ($("lEngine")) $("lEngine").value = "cloud";   // a working key clearly means they want it
   } catch (e) {
-    Object.assign(lset, before);                      // leave nothing half-changed behind
-    lpersist();                                       // ...on disk too, not only in memory
     msg.textContent = (e && e.message) ? String(e.message).split("\n")[0] : "확인에 실패했습니다.";
   } finally {
+    voiceRestore(snap);                               // memory and disk, on every path
     delete msg.dataset.busy;
+    voiceBtns(false);
+    voiceBusy = false;
   }
 }
 
