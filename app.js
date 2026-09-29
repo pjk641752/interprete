@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-29.1";
+const APP_VERSION = "2026-09-30.1";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -96,7 +96,30 @@ function appendLog(entry){
   jset("interp.log", log);
 }
 
-const todayKey = () => new Date().toISOString().slice(0, 10);
+/* The study day turns over at 03:00 local time, not at midnight UTC.
+   Slicing a UTC timestamp handed the user a fresh "today" at six in the
+   evening in Mexico, which split one evening's conversations across two
+   lessons and two summaries. Anything still going at one in the morning
+   belongs to the night before, so the boundary is 03:00.
+
+   Deliberately the DEVICE's local time rather than a hardcoded
+   America/Mexico_City: the phone is already set to Mexico, so this is the same
+   3 a.m. the user means, and it keeps being the right 3 a.m. if they travel. */
+const DAY_START_HOUR = 3;
+function studyDate(when){
+  const t = when ? new Date(when) : new Date();
+  if (isNaN(t.getTime())) return "";
+  /* built from the calendar date, so a day-1 underflow rolls the month and the
+     year properly, and so a DST jump cannot move the boundary */
+  const d = new Date(t.getFullYear(), t.getMonth(),
+                     t.getDate() - (t.getHours() < DAY_START_HOUR ? 1 : 0));
+  return d.getFullYear() + "-" +
+         String(d.getMonth() + 1).padStart(2, "0") + "-" +
+         String(d.getDate()).padStart(2, "0");
+}
+
+const todayKey = () => studyDate();
+/* the month bucket is a billing period, not a study day: left on UTC */
 const monthKey = () => new Date().toISOString().slice(0, 7);
 
 function loadUsage(){
@@ -939,7 +962,9 @@ async function callPlain(systemInstr, userText, genConfig){
 
 function todaysEntries(){
   const d = todayKey();
-  return loadLog().filter((e) => (e.at || "").slice(0, 10) === d);
+  /* each entry's own timestamp goes through the same 03:00 rule — comparing it
+     to the raw UTC slice of `at` would put the two on different calendars */
+  return loadLog().filter((e) => e && e.at && studyDate(e.at) === d);
 }
 
 async function buildDailyNote(rows){
@@ -949,8 +974,10 @@ async function buildDailyNote(rows){
     tip: e.tip || undefined,
     chunks: (e.study || []).map((s) => s.es + " = " + s.ko)
   }));
-  const now = new Date();
-  const header = "오늘은 " + (now.getMonth() + 1) + "월 " + now.getDate() +
+  /* the same study day the rows were filtered by, so a note written at 1 a.m.
+     is not headed with tomorrow's date */
+  const iso = todayKey();
+  const header = "오늘은 " + Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) +
                  "일이고, 대화는 " + rows.length + "회입니다.\n\n";
   return await callPlain(SUMMARY_PROMPT, header + JSON.stringify(payload));
 }

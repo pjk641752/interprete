@@ -7,7 +7,7 @@
    one audio track and keeps the on-screen script in sync.
 
    Loads after app.js and reuses its globals: settings, el, $,
-   jget, jset, esc, callPlain, todaysEntries, todayKey,
+   jget, jset, esc, callPlain, todaysEntries, todayKey, studyDate,
    spanishOf, koreanOf, openDlg, closeDlg, setStatus, showError,
    openSettings, busy, recording.
    ============================================================ */
@@ -15,7 +15,11 @@
 const LESSON_KEY = "interp.lesson";
 const LESSON_DEFAULTS = {
   engine: "device", ttsKey: "",
+  /* One Spanish voice and one Korean voice, chosen once and then remembered,
+     so every lesson — phone, PC or exported file — is read by the same two. */
   voiceEs: "", voiceEsCode: "", voiceKo: "", voiceKoCode: "",
+  sexEs: "female", sexKo: "female",
+  devVoiceEs: "", devVoiceKo: "",
   chars: { ym: "", n: 0 }
 };
 let lset = Object.assign({}, LESSON_DEFAULTS, jget(LESSON_KEY, {}));
@@ -29,6 +33,14 @@ const TTS_SR = 24000;
 const MP3_KBPS = 64;
 const TTS_CONCURRENCY = 3;
 const KEEP_LESSONS = 7;
+
+/* An mp3 round trip is not sample-exact. LAME prepends 576 samples of encoder
+   delay and the decoder adds its own filterbank lag, so what <audio> reports
+   as currentTime runs ahead of the timeline we built: measured at 46.04 ms for
+   this 24 kHz mono stream (1105 samples / 24000). The highlight therefore
+   looks up currentTime - MP3_DELAY_MS, and every seek adds it back, so tapping
+   a row still lands on that row rather than the one above it. */
+const MP3_DELAY_MS = 46;
 
 const SCRIPT_TIMEOUT_MS = 150000;   // writing the script is one long reasoning call
 
@@ -234,8 +246,10 @@ function lessonBuild(content, when){
   }
 
   const W = content.words.length, I = content.idioms.length, S = content.sentences.length;
-  /* the record key is the UTC day, so the label has to come off the same day */
-  const iso = when.toISOString().slice(0, 10);
+  /* the study day (03:00 local boundary, see studyDate in app.js), so the
+     stored key, the spoken date and the label on screen are all the one day —
+     a lesson made at half past midnight is still yesterday's lesson */
+  const iso = studyDate(when);
   const dateLabel = Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) + "일";
 
   /* intro */
@@ -322,15 +336,24 @@ function lessonBuild(content, when){
 }
 
 /* Start and end of every segment, and the boundary of every display row.
-   Rows run boundary to boundary so the highlight never lands in a gap. */
-function lessonTimeline(lesson){
+   Rows run boundary to boundary so the highlight never lands in a gap.
+
+   Everything here stays floating point on purpose. Rounding each segment to a
+   whole millisecond used to push the error down the track — half a millisecond
+   a segment, and a nine minute lesson has several hundred of them, so the last
+   rows sat about 150 ms off. Only the clock on screen rounds.
+
+   `sr` is passed in cloud mode. The pause between lines is written to the file
+   as a whole number of samples, so when we know the sample rate the timeline
+   counts it exactly the way the encoder did. */
+function lessonTimeline(lesson, sr){
   const segs = lesson.segments;
   let t = 0;
   for (const s of segs){
     s.start = t;
     t += (s.audioMs || 0);
     s.end = t;
-    t += s.pauseAfter * 1000;
+    t += sr ? Math.round(sr * s.pauseAfter) / sr * 1000 : s.pauseAfter * 1000;
   }
   /* the track stops at the last word, not after its trailing pause */
   const total = segs.length ? segs[segs.length - 1].end : 0;
@@ -412,12 +435,32 @@ function resample(pcm, from, to){
 
 /* ---------------- Cloud TTS ---------------- */
 
-const LANG_TRY = { es: ["es-MX", "es-US", "es-419", "es-ES"], ko: ["ko-KR"] };
-/* Preference order by voice family. Studio, Journey and Chirp either drop the
-   SSML/rate controls this lesson needs or bill far higher, so they are skipped
-   and the real list is read from the API instead of hardcoded voice names. */
-const VOICE_RANK = [/Neural2/i, /Wavenet/i, /Standard/i];
-const VOICE_SKIP = /studio|journey|chirp|news|casual|polyglot/i;
+/* Which locales to ask for, best first. Chirp 3: HD has no es-MX at all, and
+   its es-US is Latin American — much closer to Mexico than es-ES — so es-US
+   now leads instead of es-MX. */
+const LANG_TRY = { es: ["es-US", "es-MX", "es-419", "es-ES"], ko: ["ko-KR"] };
+
+/* Voice families, most natural first. Chirp 3: HD is Google's current top tier
+   and is the whole point of this change — the old ranking started at Neural2
+   and skipped Chirp entirely, which is why the lesson sounded synthetic.
+   Studio has no Spanish or Korean voice and Journey/News/Casual are English
+   only, so those are skipped rather than ranked. */
+const VOICE_RANK = [/Chirp3-HD/i, /Chirp-HD/i, /Neural2/i, /Wavenet/i, /Standard/i];
+const VOICE_SKIP = /journey|news|casual|polyglot|studio/i;
+
+/* The default is ONE named voice per language. Chirp 3: HD carries the same
+   voice set in every locale it supports and names them <locale>-Chirp3-HD-<voice>
+   (docs: cloud.google.com/text-to-speech/docs/chirp3-hd). Nothing here is
+   trusted blindly: a name is only used if voices.list says the key's project
+   really has it, and otherwise VOICE_RANK picks the closest thing that exists. */
+const VOICE_PICKS = {
+  es: { female: ["es-US-Chirp3-HD-Aoede", "es-US-Neural2-A", "es-US-Wavenet-A"],
+        male:   ["es-US-Chirp3-HD-Charon", "es-US-Neural2-B", "es-US-Wavenet-B"] },
+  ko: { female: ["ko-KR-Chirp3-HD-Leda", "ko-KR-Neural2-A", "ko-KR-Wavenet-A"],
+        male:   ["ko-KR-Chirp3-HD-Puck", "ko-KR-Neural2-C", "ko-KR-Wavenet-C"] }
+};
+const SEX_TAG = { female: "FEMALE", male: "MALE" };
+const voiceSexOf = (side) => ((side === "es" ? lset.sexEs : lset.sexKo) === "male" ? "male" : "female");
 
 function ttsError(status, msg){
   let head = "";
@@ -501,10 +544,16 @@ async function ttsListVoices(code){
   return Array.isArray(j && j.voices) ? j.voices : [];
 }
 
-/* Ask the API what actually exists. Voice names come and go, and es-MX does
-   not carry every family, so nothing here is hardcoded. */
+/* Gather every voice this key can actually see across all the candidate
+   locales, then choose once. Collecting first matters: the old code returned
+   the best voice of the FIRST locale that had any, so an es-MX Wavenet beat an
+   es-US Chirp 3: HD purely because es-MX was asked for first. */
 async function ttsPickVoice(side){
-  for (const code of LANG_TRY[side]){
+  const want = voiceSexOf(side);
+  const all = [];
+
+  for (let i = 0; i < LANG_TRY[side].length; i++){
+    const code = LANG_TRY[side][i];
     let voices = [];
     try { voices = await ttsListVoices(code); }
     catch (e) {
@@ -517,15 +566,39 @@ async function ttsPickVoice(side){
       if (/__cancelled__|API key|API_KEY_INVALID|권한|결제|한도|연결하지 못했|응답하지 않아|켜져 있지 않/.test(m)) throw e;
       continue;
     }
-    const usable = voices.filter((v) => v && v.name && !VOICE_SKIP.test(v.name));
-    const pick = (v) => ({ name: v.name, code: (v.languageCodes && v.languageCodes[0]) || code });
-    for (const rank of VOICE_RANK){
-      const hit = usable.find((v) => rank.test(v.name));
-      if (hit) return pick(hit);
+    for (const v of voices){
+      if (!v || !v.name || VOICE_SKIP.test(v.name)) continue;
+      all.push({
+        name: v.name,
+        code: (v.languageCodes && v.languageCodes[0]) || code,
+        sex: String(v.ssmlGender || ""),
+        localeRank: i
+      });
     }
-    if (usable.length) return pick(usable[0]);
   }
-  return null;
+  if (!all.length) return null;
+
+  const byName = new Map();
+  for (const v of all) if (!byName.has(v.name)) byName.set(v.name, v);
+
+  /* the named default, but only if this project really has it */
+  for (const name of VOICE_PICKS[side][want]) if (byName.has(name)) return byName.get(name);
+
+  /* otherwise: best family, then the requested gender, then the best locale,
+     then alphabetical — the last one is what makes this repeatable. Picking
+     "the first match the API happened to return" is how two devices with the
+     same key ended up on two different voices. */
+  const famOf = (n) => {
+    for (let i = 0; i < VOICE_RANK.length; i++) if (VOICE_RANK[i].test(n)) return i;
+    return VOICE_RANK.length;
+  };
+  const sexMiss = (v) => (v.sex === SEX_TAG[want] ? 0 : 1);
+  all.sort((a, b) =>
+    famOf(a.name) - famOf(b.name) ||
+    sexMiss(a) - sexMiss(b) ||
+    a.localeRank - b.localeRank ||
+    a.name.localeCompare(b.name));
+  return all[0];
 }
 
 async function ttsEnsureVoices(){
@@ -542,18 +615,54 @@ async function ttsEnsureVoices(){
   lpersist();
 }
 
+/* Google's own docs disagree about Chirp 3: HD and speed. The supported-voices
+   page still says the family "doesn't support SSML input, speaking rate and
+   pitch-audio parameters"; the Chirp 3 page documents a pace control
+   ("the speaking_rate parameter", 0.25x-2x) and the release notes date it —
+   2025-05-07, "Pace control is available across all locales". The release note
+   is the later statement, so speakingRate is expected to work and the other
+   page is taken as stale.
+
+   Expected, not verified: this was never run against a real key. So the code
+   does not bet on it. speakingRate is sent only for the one deliberately slow
+   read, and if that single request is refused for it, the same line is asked
+   for again at the voice's own speed. The slow read then simply is not slow,
+   and the notice says so — which beats failing the whole lesson over it. */
+let ttsRateRefused = false;
+const RATE_REFUSED = /speaking_?rate|audio_?config|not supported|unsupported|invalid/i;
+
 async function ttsSay(text, side, rate){
   const name = side === "es" ? lset.voiceEs : lset.voiceKo;
-  const code = (side === "es" ? lset.voiceEsCode : lset.voiceKoCode) || (side === "es" ? "es-MX" : "ko-KR");
-  const j = await ttsFetch(TTS_URL, {
+  const code = (side === "es" ? lset.voiceEsCode : lset.voiceKoCode) || (side === "es" ? "es-US" : "ko-KR");
+  const base = { audioEncoding: "LINEAR16", sampleRateHertz: TTS_SR };
+  const want = rate || 1;
+
+  const send = (cfg) => ttsFetch(TTS_URL, {
     method: "POST",
     headers: { "x-goog-api-key": lset.ttsKey, "Content-Type": "application/json" },
     body: JSON.stringify({
       input: { text: text },
       voice: { languageCode: code, name: name },
-      audioConfig: { audioEncoding: "LINEAR16", sampleRateHertz: TTS_SR, speakingRate: rate || 1 }
+      audioConfig: cfg
     })
   });
+
+  let j = null;
+  if (want === 1 || ttsRateRefused){
+    /* at normal speed the parameter buys nothing, so it is not sent at all —
+       that keeps the risk confined to the handful of slow segments */
+    j = await send(base);
+  } else {
+    try {
+      j = await send(Object.assign({}, base, { speakingRate: want }));
+    } catch (e) {
+      const m = (e && e.message) || "";
+      if (!/TTS 400/.test(m) || !RATE_REFUSED.test(m)) throw e;
+      ttsRateRefused = true;
+      j = await send(base);
+    }
+  }
+
   if (!j || !j.audioContent) throw new Error("Cloud TTS 응답에 오디오가 없습니다.");
   return pcmFromBytes(b64ToBytes(j.audioContent));
 }
@@ -649,6 +758,8 @@ async function lessonSynthesize(lesson, onProgress, onPhase){
      hundred TTS requests and throwing the audio away. */
   const lame = await loadLame();
   await ttsEnsureVoices();
+  /* a different voice may answer differently, so this is re-decided each run */
+  ttsRateRefused = false;
 
   /* a word is spoken three times in 1교시 and again in 4교시 — synthesise it
      once and reuse the audio, which cuts both requests and billed characters */
@@ -693,7 +804,9 @@ async function lessonSynthesize(lesson, onProgress, onPhase){
     const s = segs[i];
     const pcm = audio.get(cacheKey(s));
     if (!pcm) throw new Error("빠진 음성이 있습니다: " + s.text.slice(0, 20));
-    s.audioMs = Math.round(pcm.length / sr * 1000);
+    /* no rounding: this is the exact length of what was just written, and the
+       timeline is the running sum of these */
+    s.audioMs = pcm.length / sr * 1000;
     out.write(pcm);
     /* the pause after the last line is never written: the timeline ends at the
        last word, and trailing silence would leave the bar at 100% while the
@@ -701,7 +814,7 @@ async function lessonSynthesize(lesson, onProgress, onPhase){
     if (s.pauseAfter > 0 && i < segs.length - 1) out.write(silence(s.pauseAfter));
   }
 
-  lessonTimeline(lesson);
+  lessonTimeline(lesson, sr);
   lesson.sampleRate = sr;
   lesson.chars = jobs.reduce((n, p) => n + p[1].text.length, 0);
   return out.finish();
@@ -788,16 +901,34 @@ function audioPlayer(lesson, blob, onTick){
   const a = new Audio();
   a.preload = "auto";
   a.src = url;
-  let timer = null, speed = 1, dead = false;
+  let raf = 0, speed = 1, dead = false;
+
+  /* The player reports TIMELINE position, not file position: currentTime runs
+     MP3_DELAY_MS ahead of the script because of the codec's own delay. Seeks
+     put it back, so a tapped row lands on that row — subtracting on the way in
+     without adding it on the way out would light up the row above instead. */
+  const posMs = () => Math.max(0, a.currentTime * 1000 - MP3_DELAY_MS);
 
   /* destroy() pauses, and that "pause" event lands one task later — by then a
      new lesson may already be mounted, and this tick would paint the old
      audio's position onto the new script for a frame */
-  const tick = () => { if (!dead) onTick(a.currentTime * 1000, !a.paused); };
-  const stopTimer = () => { if (timer){ clearInterval(timer); timer = null; } };
+  const tick = () => { if (!dead) onTick(posMs(), !a.paused); };
+
+  /* timeupdate alone fires about every 250 ms, which is visibly late on a
+     one-word row. The old helper was a 150 ms interval; a frame loop is both
+     smoother and cheaper, because it only runs while something is playing and
+     the browser stops it outright when the tab is hidden. */
+  const stopTimer = () => { if (raf){ cancelAnimationFrame(raf); raf = 0; } };
+  const frame = () => {
+    if (dead || a.paused){ raf = 0; return; }
+    tick();
+    raf = requestAnimationFrame(frame);
+  };
+  const startTimer = () => { if (!raf && !dead) raf = requestAnimationFrame(frame); };
 
   a.addEventListener("timeupdate", tick);
-  a.addEventListener("play", () => { if (!timer) timer = setInterval(tick, 150); tick(); });
+  a.addEventListener("play", () => { startTimer(); tick(); });
+  a.addEventListener("playing", startTimer);
   a.addEventListener("pause", () => { stopTimer(); tick(); });
   a.addEventListener("ended", () => { stopTimer(); tick(); });
   /* a play button that silently does nothing is the worst failure here, so
@@ -816,12 +947,17 @@ function audioPlayer(lesson, blob, onTick){
     },
     pause: () => a.pause(),
     toggle: function (){ a.paused ? this.play() : this.pause(); },
-    seek: (ms) => { try { a.currentTime = Math.max(0, ms / 1000); } catch (e) {} tick(); },
-    nudge: function (sec){ this.seek((a.currentTime + sec) * 1000); },
+    /* ms is a timeline position, so the codec delay goes back on here */
+    seek: (ms) => {
+      try { a.currentTime = (Math.max(0, ms) + MP3_DELAY_MS) / 1000; } catch (e) {}
+      tick();
+    },
+    /* measured from the timeline position, so repeated nudges cannot drift */
+    nudge: function (sec){ this.seek(posMs() + sec * 1000); },
     step: function (d){ this.nudge(d * 10); },
     speed: (v) => { speed = v; a.playbackRate = v; },
     speedNow: () => speed,
-    at: () => a.currentTime * 1000,
+    at: posMs,
     destroy: () => {
       dead = true;
       stopTimer();
@@ -835,11 +971,104 @@ function audioPlayer(lesson, blob, onTick){
   };
 }
 
+/* ---------------- device voices (speechSynthesis fallback) ----------------
+
+   Left to itself the browser picks a voice per utterance, and on a device with
+   no Spanish installed it happily reads Spanish with a Korean or English
+   voice — which is exactly the "발음이 이상하다" the user heard. So: choose one
+   voice per language explicitly, remember it by name, and say plainly when
+   there is no Spanish voice to choose from. */
+
+/* es-MX first (the user lives in Mexico), then the other Latin American
+   codings, then Spain, then anything Spanish at all. */
+const DEV_LANG_RANK = {
+  es: ["es-mx", "es-us", "es-419", "es-la", "es-es", "es"],
+  ko: ["ko-kr", "ko"]
+};
+
+function devVoiceList(){
+  try {
+    const v = window.speechSynthesis && window.speechSynthesis.getVoices();
+    return Array.isArray(v) ? v : [];
+  } catch (e) { return []; }
+}
+
+/* Chrome fills the list asynchronously and hands back [] on the first call, so
+   a check that ran immediately would report "no Spanish voice" on a device
+   that has one. Wait for voiceschanged, but never for long. */
+function devVoicesReady(){
+  return new Promise((resolve) => {
+    if (devVoiceList().length) return resolve(devVoiceList());
+    let done = false;
+    const finish = () => {
+      if (done) return;
+      done = true;
+      try { window.speechSynthesis.removeEventListener("voiceschanged", finish); } catch (e) {}
+      resolve(devVoiceList());
+    };
+    try { window.speechSynthesis.addEventListener("voiceschanged", finish); } catch (e) { return resolve([]); }
+    setTimeout(finish, 1200);
+  });
+}
+
+function devLangScore(side, lang){
+  const l = String(lang || "").toLowerCase().replace(/_/g, "-");
+  const rank = DEV_LANG_RANK[side];
+  for (let i = 0; i < rank.length; i++){
+    if (l === rank[i] || l.indexOf(rank[i] + "-") === 0) return i;
+  }
+  return l.indexOf(side === "es" ? "es" : "ko") === 0 ? rank.length : -1;
+}
+
+/* One voice per language, decided the same way every time on the same device:
+   closest language coding first, then Google's own voices (clearly better than
+   the stock ones on Android), then alphabetically so the answer never depends
+   on the order the engine listed them in. */
+function devPickVoice(side, voices){
+  const usable = [];
+  for (const v of voices){
+    if (!v || !v.lang) continue;
+    const s = devLangScore(side, v.lang);
+    if (s >= 0) usable.push({ v: v, s: s });
+  }
+  if (!usable.length) return null;
+
+  const remembered = side === "es" ? lset.devVoiceEs : lset.devVoiceKo;
+  if (remembered){
+    const keep = usable.find((x) => x.v.name === remembered);
+    if (keep) return keep.v;
+  }
+  usable.sort((a, b) =>
+    a.s - b.s ||
+    (/google/i.test(a.v.name) ? 0 : 1) - (/google/i.test(b.v.name) ? 0 : 1) ||
+    String(a.v.name).localeCompare(String(b.v.name)));
+  return usable[0].v;
+}
+
+/* Resolved once per mounted lesson and reused for every line, so the voice
+   cannot change halfway through. */
+function devVoicePair(voices){
+  const es = devPickVoice("es", voices), ko = devPickVoice("ko", voices);
+  if (es && lset.devVoiceEs !== es.name){ lset.devVoiceEs = es.name; lpersist(); }
+  if (ko && lset.devVoiceKo !== ko.name){ lset.devVoiceKo = ko.name; lpersist(); }
+  return { es: es, ko: ko };
+}
+
+const NO_ES_VOICE =
+  "이 기기에는 스페인어 목소리가 없어 스페인어를 다른 언어 목소리로 읽습니다. 발음이 깨집니다.\n" +
+  "설정에서 고품질 음성(Cloud TTS)을 켜시거나, 기기 설정에서 스페인어 음성을 내려받으십시오.";
+
 /* No audio file: the app speaks each line itself, so the highlight is exact
    by construction. Screen off stops it — that is the trade, and it is said
    so on screen. */
 function devicePlayer(lesson, onTick){
   let idx = 0, alive = true, running = false, rate = 1, waitTimer = null;
+  /* Picked once, here, rather than per line: the list can change under us and
+     a lesson that swaps voices halfway is worse than one slightly stale pick. */
+  let voices = devVoicePair(devVoiceList());
+  if (!voices.es || !voices.ko){
+    devVoicesReady().then((list) => { if (alive) voices = devVoicePair(list); }).catch(() => {});
+  }
   /* speechSynthesis.cancel() delivers onend/onerror asynchronously, so a
      cancelled line can report finishing AFTER a seek has already started the
      next line. Every chain carries the epoch it began in; anything from an
@@ -880,7 +1109,11 @@ function devicePlayer(lesson, onTick){
     };
     try {
       const u = new SpeechSynthesisUtterance(s.text);
+      const pick = s.speaker === "es" ? voices.es : voices.ko;
       u.lang = s.speaker === "es" ? "es-MX" : "ko-KR";
+      /* naming the voice is what stops the engine reading Spanish with
+         whatever voice it feels like; lang alone is only a hint */
+      if (pick){ u.voice = pick; u.lang = pick.lang || u.lang; }
       u.rate = Math.max(0.1, Math.min(10, (s.rate || 1) * rate));
       u.onend = go;
       u.onerror = go;
@@ -1107,6 +1340,16 @@ function mountLesson(rec, notice){
     : devicePlayer(current.lesson, onTick);
   wireMediaSession();
   onTick(0, false);
+
+  /* A saved device-mode lesson reopened on a phone with no Spanish voice would
+     otherwise just sound wrong with nothing said about it. Checked after the
+     mount because Chrome hands back an empty voice list on the first call. */
+  if (!current.blob && !notice){
+    const mine = current;
+    devVoicesReady().then((list) => {
+      if (current === mine && list.length && !devPickVoice("es", list)) lessonNotice(NO_ES_VOICE);
+    }).catch(() => {});
+  }
 }
 
 function lessonMessage(title, sub, extraHtml){
@@ -1158,6 +1401,21 @@ async function openLesson(force){
 }
 
 async function makeLesson(rows){
+  /* Asked BEFORE anything is written, because the script costs Gemini money:
+     on a device with no Spanish voice the whole lesson would be read in the
+     wrong accent, and the user should get to turn Cloud TTS on first rather
+     than find out after paying for it. */
+  if (!(lset.engine === "cloud" && lset.ttsKey)){
+    const list = await devVoicesReady().catch(() => []);
+    if (list.length && !devPickVoice("es", list) && !confirm(NO_ES_VOICE + "\n\n그래도 이대로 만들까요?")){
+      /* a blank screen would read as a crash, so say why nothing happened */
+      lessonMessage("수업을 만들지 않았습니다.", "설정에서 고품질 음성을 켜신 뒤 다시 눌러주십시오.");
+      $("lFoot").innerHTML = '<button class="mini" id="lPastBtn" type="button">🗂 지난 수업</button>';
+      $("lPastBtn").onclick = showPast;
+      return;
+    }
+  }
+
   lessonCancelled = false;
   busy = true;
   /* nothing between `busy = true` and this try: a throw in the setup below
@@ -1211,6 +1469,11 @@ async function makeLesson(rows){
 
     const notice = [
       fellBack ? "고품질 음성을 만들지 못해 기기 음성으로 수업을 만들었습니다.\n" + fellBack : "",
+      /* the docs disagree about this voice family and speed; if the API refused
+         the slow read, say so rather than let it look like a bug */
+      blob && ttsRateRefused
+        ? "이 음성은 «느리게 읽기» 를 지원하지 않아, 느린 문장도 보통 속도로 읽습니다." : "",
+      !blob && !devPickVoice("es", devVoiceList()) ? NO_ES_VOICE : "",
       saveNote
     ].filter(Boolean).join("\n\n");
 
@@ -1288,15 +1551,20 @@ function safeJson(obj){
 /* Everything inline: the script, the audio, the timeline and a player.
    No external reference at all, so file:// on a PC works the same as a phone. */
 function exportHtml(lesson, b64){
+  /* the timeline is floating point; 0.1 ms is far finer than anything audible
+     and keeps the embedded JSON from carrying 17 digits per row */
+  const ms1 = (v) => Math.round((v || 0) * 10) / 10;
   const data = {
     dateLabel: lesson.dateLabel, date: lesson.date, counts: lesson.counts,
-    totalMs: lesson.totalMs, hasAudio: !!b64,
+    totalMs: ms1(lesson.totalMs), hasAudio: !!b64,
+    /* the same codec delay the app corrects for — see MP3_DELAY_MS */
+    delayMs: b64 ? MP3_DELAY_MS : 0,
     rows: lesson.rows.map((r) => ({
       kind: r.kind, es: r.es || "", ko: r.ko || "", badge: r.badge || "", from: r.from || "",
-      sectionId: r.sectionId, sectionTitle: r.sectionTitle, start: r.start
+      sectionId: r.sectionId, sectionTitle: r.sectionTitle, start: ms1(r.start)
     })),
     segments: lesson.segments.map((s) => ({
-      speaker: s.speaker, text: s.text, rate: s.rate, pauseAfter: s.pauseAfter, start: s.start
+      speaker: s.speaker, text: s.text, rate: s.rate, pauseAfter: s.pauseAfter, start: ms1(s.start)
     }))
   };
 
@@ -1357,6 +1625,10 @@ function exportHtml(lesson, b64){
 '</div>',
 (b64 ? '' : '<div class="warn">이 파일에는 녹음된 소리가 들어 있지 않고, 여는 기기의 음성으로 읽습니다. ' +
             '스페인어와 한국어 음성이 깔린 기기에서 열어주십시오. 화면을 끄면 멈춥니다.</div>'),
+/* shown only once the voice list says this device has no Spanish voice */
+(b64 ? '' : '<div class="warn" id="novoice" style="display:none">이 기기에는 스페인어 목소리가 없어 ' +
+            '스페인어를 다른 언어 목소리로 읽습니다. 발음이 깨집니다. ' +
+            '기기 설정에서 스페인어 음성을 내려받으신 뒤 다시 열어주십시오.</div>'),
 '</div>',
 '<div class="body" id="body"></div>',
 '<script id="L" type="application/json">' + safeJson(data) + '<\/script>',
@@ -1423,18 +1695,51 @@ function exportHtml(lesson, b64){
 '    a.src = URL.createObjectURL(new Blob([u], { type: "audio/mpeg" }));',
 '  } catch (e){ a.src = dataUri(); fellBack = true; }',
 '  a.addEventListener("error", function(){ if (!fellBack){ fellBack = true; a.src = dataUri(); } });',
-'  var t = function(){ tick(a.currentTime*1000, !a.paused); };',
-'  var stopT = function(){ if (timer){ clearInterval(timer); timer = null; } };',
+'  /* currentTime runs D.delayMs ahead of the script because of the mp3 codec',
+'     delay, so reads subtract it and seeks add it back. */',
+'  var pos = function(){ return Math.max(0, a.currentTime*1000 - D.delayMs); };',
+'  var t = function(){ tick(pos(), !a.paused); };',
+'  var stopT = function(){ if (timer){ cancelAnimationFrame(timer); timer = null; } };',
+'  var frame = function(){ if (a.paused){ timer = null; return; }',
+'    t(); timer = requestAnimationFrame(frame); };',
+'  var startT = function(){ if (!timer) timer = requestAnimationFrame(frame); };',
 '  a.addEventListener("timeupdate", t);',
-'  a.addEventListener("play", function(){ if (!timer) timer = setInterval(t, 150); t(); });',
+'  a.addEventListener("play", function(){ startT(); t(); });',
+'  a.addEventListener("playing", startT);',
 '  a.addEventListener("pause", function(){ stopT(); t(); });',
 '  a.addEventListener("ended", function(){ stopT(); t(); });',
 '  P = { toggle: function(){ a.paused ? a.play() : a.pause(); },',
-'        seek: function(ms){ try { a.currentTime = Math.max(0, ms/1000); } catch (e){} t(); },',
-'        step: function(d){ P.seek((a.currentTime + d*10) * 1000); },',
+'        seek: function(ms){ try { a.currentTime = (Math.max(0, ms) + D.delayMs)/1000; } catch (e){} t(); },',
+'        step: function(d){ P.seek(pos() + d*10000); },',
 '        speed: function(v){ sp = v; a.playbackRate = v; }, now: function(){ return sp; } };',
 '} else {',
 '  var idx = 0, run = false, rate = 1, wt = null, epoch = 0;',
+'  /* Naming the voice is what stops the engine reading Spanish with a Korean',
+'     or English voice on a device that has no Spanish installed. Same ranking',
+'     as the app: closest coding, then Google voices, then alphabetical. */',
+'  var RANK = { es: ["es-mx","es-us","es-419","es-la","es-es","es"], ko: ["ko-kr","ko"] };',
+'  var vlist = function(){ try { var v = speechSynthesis.getVoices(); return v || []; } catch (e){ return []; } };',
+'  var score = function(side, lang){',
+'    var l = String(lang||"").toLowerCase().replace(/_/g,"-"), r = RANK[side];',
+'    for (var i = 0; i < r.length; i++) if (l === r[i] || l.indexOf(r[i]+"-") === 0) return i;',
+'    return l.indexOf(side === "es" ? "es" : "ko") === 0 ? r.length : -1; };',
+'  var pickV = function(side){',
+'    var u = [], all = vlist();',
+'    for (var i = 0; i < all.length; i++){ var s2 = score(side, all[i].lang);',
+'      if (s2 >= 0) u.push({ v: all[i], s: s2 }); }',
+'    if (!u.length) return null;',
+'    u.sort(function(a,b){ return a.s - b.s ||',
+'      (/google/i.test(a.v.name)?0:1) - (/google/i.test(b.v.name)?0:1) ||',
+'      String(a.v.name).localeCompare(String(b.v.name)); });',
+'    return u[0].v; };',
+'  var VO = { es: null, ko: null };',
+'  var warnEl = document.getElementById("novoice");',
+'  var setVoices = function(){ VO.es = pickV("es"); VO.ko = pickV("ko");',
+'    if (warnEl) warnEl.style.display = VO.es ? "none" : "block"; };',
+'  setVoices();',
+'  /* Chrome fills the list asynchronously and returns [] on the first call */',
+'  try { speechSynthesis.addEventListener("voiceschanged", setVoices); } catch (e){}',
+'  setTimeout(setVoices, 1200);',
 '  var pos = function(){ var s = D.segments[Math.min(idx, D.segments.length-1)]; return s ? s.start : 0; };',
 '  var rep = function(){ tick(pos(), run); };',
 '  /* cancel() reports onend asynchronously, so a cancelled line can finish',
@@ -1453,7 +1758,9 @@ function exportHtml(lesson, b64){
 '        idx++; step1(); }, s.pauseAfter*1000/rate); };',
 '    try {',
 '      var u = new SpeechSynthesisUtterance(s.text);',
+'      var pv = s.speaker === "es" ? VO.es : VO.ko;',
 '      u.lang = s.speaker === "es" ? "es-MX" : "ko-KR";',
+'      if (pv){ u.voice = pv; u.lang = pv.lang || u.lang; }',
 '      u.rate = Math.max(0.1, Math.min(10, (s.rate||1)*rate));',
 '      u.onend = go; u.onerror = go;',
 '      speechSynthesis.speak(u);',
@@ -1533,9 +1840,11 @@ async function exportLesson(){
 /* ---------------- settings panel (called from app.js) ---------------- */
 
 function lessonVoiceLine(){
-  return (lset.voiceEs || lset.voiceKo)
-    ? "쓰는 음성: " + (lset.voiceEs || "—") + " / " + (lset.voiceKo || "—")
-    : "";
+  if (lset.engine === "cloud" && (lset.voiceEs || lset.voiceKo))
+    return "쓰는 음성: " + (lset.voiceEs || "—") + " / " + (lset.voiceKo || "—");
+  if (lset.devVoiceEs || lset.devVoiceKo)
+    return "기기 음성: " + (lset.devVoiceEs || "—") + " / " + (lset.devVoiceKo || "—");
+  return "";
 }
 
 function lessonFillSettings(){
@@ -1543,6 +1852,16 @@ function lessonFillSettings(){
   if (!eng) return;
   eng.value = lset.engine;
   $("lTtsKey").value = lset.ttsKey;
+  const se = $("lSexEs"), sk = $("lSexKo");
+  if (se) se.value = lset.sexEs === "male" ? "male" : "female";
+  if (sk) sk.value = lset.sexKo === "male" ? "male" : "female";
+  /* the device list is what fills in the "기기 음성: …" line, and on Chrome it
+     is empty until voiceschanged fires */
+  devVoicesReady().then((list) => {
+    devVoicePair(list);
+    const vm = $("lVoiceMsg");
+    if (vm && !vm.dataset.busy) vm.textContent = lessonVoiceLine();
+  }).catch(() => {});
   const vm = $("lVoiceMsg");
   if (vm) vm.textContent = lessonVoiceLine();
 }
@@ -1551,16 +1870,112 @@ function lessonSaveSettings(){
   const eng = $("lEngine");
   if (!eng) return;
   const before = lset.ttsKey;
+  const sexBefore = lset.sexEs + "|" + lset.sexKo;
   lset.engine = eng.value === "cloud" ? "cloud" : "device";
   lset.ttsKey = $("lTtsKey").value.trim();
-  /* a new key means a new project: the picked voices may not exist there */
-  if (lset.ttsKey !== before){
+  if ($("lSexEs")) lset.sexEs = $("lSexEs").value === "male" ? "male" : "female";
+  if ($("lSexKo")) lset.sexKo = $("lSexKo").value === "male" ? "male" : "female";
+  /* a new key means a new project, and a new gender means a different voice:
+     either way the remembered pick has to be made again */
+  if (lset.ttsKey !== before || sexBefore !== lset.sexEs + "|" + lset.sexKo){
     lset.voiceEs = ""; lset.voiceEsCode = ""; lset.voiceKo = ""; lset.voiceKoCode = "";
   }
   lpersist();
 }
 
 let testAudio = null;
+
+/* ---- 시험 듣기 ---- */
+
+const PREVIEW_TEXT = {
+  es: "Buenas tardes. Vamos a empezar la lección de hoy.",
+  ko: "안녕하세요. 오늘 수업을 시작하겠습니다."
+};
+/* One line per voice is billed once and then replayed from here: the point of
+   the button is to compare voices, and comparing should not cost per press. */
+const previewCache = new Map();
+
+function previewPlay(blob){
+  const url = URL.createObjectURL(blob);
+  if (testAudio){ try { testAudio.pause(); } catch (e) {} }
+  const a = new Audio(url);
+  testAudio = a;
+  const done = () => { URL.revokeObjectURL(url); if (testAudio === a) testAudio = null; };
+  a.onended = done;
+  a.onerror = done;
+  a.play().catch(done);
+}
+
+async function lessonPreview(side){
+  const msg = $("lVoiceMsg");
+  if (!msg) return;
+  const text = PREVIEW_TEXT[side];
+
+  /* whichever engine the dialog is currently set to, not whichever was saved */
+  const wantCloud = $("lEngine") && $("lEngine").value === "cloud";
+  const key = $("lTtsKey") ? $("lTtsKey").value.trim() : "";
+
+  if (!wantCloud || !key){
+    const list = await devVoicesReady().catch(() => []);
+    const v = devPickVoice(side, list);
+    if (!v){
+      msg.textContent = side === "es"
+        ? "이 기기에는 스페인어 목소리가 없습니다. 고품질 음성을 켜시는 것을 권합니다."
+        : "이 기기에는 한국어 목소리가 없습니다.";
+      return;
+    }
+    devVoicePair(list);
+    try {
+      window.speechSynthesis.cancel();
+      const u = new SpeechSynthesisUtterance(text);
+      u.voice = v; u.lang = v.lang || (side === "es" ? "es-MX" : "ko-KR");
+      window.speechSynthesis.speak(u);
+      msg.textContent = "기기 음성: " + v.name;
+    } catch (e) { msg.textContent = "기기 음성을 재생하지 못했습니다."; }
+    return;
+  }
+
+  /* the dialog can be dismissed without saving, so work on a copy and only
+     keep what actually worked — same rule as 음성 확인 below */
+  const before = { ttsKey: lset.ttsKey, sexEs: lset.sexEs, sexKo: lset.sexKo,
+                   voiceEs: lset.voiceEs, voiceEsCode: lset.voiceEsCode,
+                   voiceKo: lset.voiceKo, voiceKoCode: lset.voiceKoCode };
+  lset.ttsKey = key;
+  if ($("lSexEs")) lset.sexEs = $("lSexEs").value === "male" ? "male" : "female";
+  if ($("lSexKo")) lset.sexKo = $("lSexKo").value === "male" ? "male" : "female";
+  /* the gender in the dialog may differ from the one the stored pick was made
+     for, so the pick is redone for this preview */
+  lset.voiceEs = ""; lset.voiceEsCode = ""; lset.voiceKo = ""; lset.voiceKoCode = "";
+
+  msg.dataset.busy = "1";
+  msg.textContent = "듣는 중…";
+  try {
+    const lame = await loadLame();
+    await ttsEnsureVoices();
+    const name = side === "es" ? lset.voiceEs : lset.voiceKo;
+
+    let blob = previewCache.get(name);
+    if (!blob){
+      const got = await ttsSay(text, side, 1);
+      addTtsChars(text.length);
+      const w = mp3Writer(lame, got.sr);
+      w.write(got.pcm);
+      blob = w.finish();
+      previewCache.set(name, blob);
+    }
+    previewPlay(blob);
+    msg.textContent = name;
+  } catch (e) {
+    /* ttsEnsureVoices persists as soon as it has picked, so a failure after
+       that point would leave storage holding a key the user never saved:
+       put the old values back on disk as well as in memory */
+    Object.assign(lset, before);
+    lpersist();
+    msg.textContent = (e && e.message) ? String(e.message).split("\n")[0] : "들어보지 못했습니다.";
+  } finally {
+    delete msg.dataset.busy;
+  }
+}
 
 async function lessonTestVoice(){
   const msg = $("lVoiceMsg");
@@ -1570,34 +1985,40 @@ async function lessonTestVoice(){
 
   /* The dialog can still be dismissed without saving, so the test must not be
      what writes settings. Work on a copy and only keep it if it worked. */
-  const before = { ttsKey: lset.ttsKey, voiceEs: lset.voiceEs, voiceEsCode: lset.voiceEsCode,
+  const before = { ttsKey: lset.ttsKey, sexEs: lset.sexEs, sexKo: lset.sexKo,
+                   voiceEs: lset.voiceEs, voiceEsCode: lset.voiceEsCode,
                    voiceKo: lset.voiceKo, voiceKoCode: lset.voiceKoCode };
   lset.ttsKey = key;
+  if ($("lSexEs")) lset.sexEs = $("lSexEs").value === "male" ? "male" : "female";
+  if ($("lSexKo")) lset.sexKo = $("lSexKo").value === "male" ? "male" : "female";
   lset.voiceEs = ""; lset.voiceEsCode = ""; lset.voiceKo = ""; lset.voiceKoCode = "";
+  msg.dataset.busy = "1";
   msg.textContent = "확인 중…";
 
   try {
     const lame = await loadLame();
     await ttsEnsureVoices();
-    const got = await ttsSay("Buenas tardes. Vamos a empezar la lección.", "es", 1);
-    addTtsChars(45);
+    const text = PREVIEW_TEXT.es;
 
-    const w = mp3Writer(lame, got.sr);
-    w.write(got.pcm);
-    const url = URL.createObjectURL(w.finish());
-    if (testAudio){ try { testAudio.pause(); } catch (e) {} }
-    const a = new Audio(url);
-    testAudio = a;
-    const done = () => { URL.revokeObjectURL(url); if (testAudio === a) testAudio = null; };
-    a.onended = done;
-    a.onerror = done;
-    a.play().catch(done);
+    let blob = previewCache.get(lset.voiceEs);
+    if (!blob){
+      const got = await ttsSay(text, "es", 1);
+      addTtsChars(text.length);
+      const w = mp3Writer(lame, got.sr);
+      w.write(got.pcm);
+      blob = w.finish();
+      previewCache.set(lset.voiceEs, blob);
+    }
+    previewPlay(blob);
 
     msg.textContent = "정상입니다. " + lset.voiceEs + " / " + lset.voiceKo;
     if ($("lEngine")) $("lEngine").value = "cloud";   // a working key clearly means they want it
   } catch (e) {
     Object.assign(lset, before);                      // leave nothing half-changed behind
+    lpersist();                                       // ...on disk too, not only in memory
     msg.textContent = (e && e.message) ? String(e.message).split("\n")[0] : "확인에 실패했습니다.";
+  } finally {
+    delete msg.dataset.busy;
   }
 }
 
@@ -1610,6 +2031,10 @@ async function lessonTestVoice(){
   if (close) close.onclick = () => { stopPlayer(); closeDlg($("lesson")); };
   const test = $("lTestVoice");
   if (test) test.onclick = lessonTestVoice;
+  const tryEs = $("lTryEs");
+  if (tryEs) tryEs.onclick = () => { lessonPreview("es").catch(() => {}); };
+  const tryKo = $("lTryKo");
+  if (tryKo) tryKo.onclick = () => { lessonPreview("ko").catch(() => {}); };
   const dlg = $("lesson");
   if (dlg) dlg.addEventListener("close", stopPlayer);
 })();
