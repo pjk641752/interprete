@@ -1717,6 +1717,11 @@ async function askSpeak(i, btn){
 
   if (!(lset.engine === "cloud" && lset.ttsKey)){ askSpeakDevice(t.parts); return; }
 
+  /* The screen this answer belongs to. Synthesising it is several requests, and
+     the cache is keyed by turn number only — so a lesson opened in the meantime
+     would be handed THIS lesson's audio filed under its own turn numbers, and
+     would hear it start playing over the top. */
+  const tag = lessonAskTag();
   askSpeaking = true;
   const label = btn ? btn.innerHTML : "";
   if (btn){ btn.disabled = true; btn.textContent = "만드는 중…"; }
@@ -1736,11 +1741,13 @@ async function askSpeak(i, btn){
         if (k < t.parts.length - 1) out.write(gap);
       }
       blob = out.finish();
+      if (!askTagValid(tag)) return;          // a different lesson is on screen now
       askAudioCache.set(i, blob);
     }
+    if (!askTagValid(tag)) return;
     previewPlay(blob);
   } catch (e) {
-    askSpeakDevice(t.parts);
+    if (askTagValid(tag)) askSpeakDevice(t.parts);
   } finally {
     askSpeaking = false;
     if (btn){ btn.disabled = false; btn.innerHTML = label || "&#128266; 읽어주기"; }
@@ -1750,17 +1757,27 @@ async function askSpeak(i, btn){
 /* ---- storage ---- */
 
 /* Only the settled turns, and never the audio. The record is read back and put
-   whole so nothing else on it is disturbed. */
-async function qaPersist(){
-  if (!current || !current.date) return;
+   whole so nothing else on it is disturbed.
+
+   Both WHAT to write and WHERE to write it are taken at call time and never
+   re-read from `current` afterwards. Reading the global after the await was the
+   bug: the lookup for lesson A could still be in flight when the user opened
+   lesson B, and the write then put B's questions onto A's record. The turns are
+   copied, the record is fetched by the tag's own date, and the tag is checked
+   once more immediately before the put — a lesson re-made in the meantime is a
+   different record, and stale history must not land on it. */
+async function qaPersist(turns, tag){
+  if (!tag || !tag.date || !Array.isArray(turns)) return;
+  /* copied per turn, so later edits to current.qa cannot reach a write that is
+     already on its way */
+  const snap = turns.map((t) => ({ q: t.q, via: t.via, parts: t.parts, at: t.at }));
   try {
     const db = await openDb();
     try {
-      const rec = await rq2p(lessonStore(db, "readonly").get(current.date));
+      const rec = await rq2p(lessonStore(db, "readonly").get(tag.date));
       if (!rec) return;
-      rec.qa = (current.qa || []).map((t) => ({
-        q: t.q, via: t.via, parts: t.parts, at: t.at
-      }));
+      if (!askTagValid(tag)) return;          // the screen moved on mid-lookup
+      rec.qa = snap;
       await rq2p(lessonStore(db, "readwrite").put(rec));
     } finally { db.close(); }
   } catch (e) {
@@ -1821,7 +1838,9 @@ async function askAsk(pending){
     if (current.qa.length > ASK_KEEP) current.qa = current.qa.slice(-ASK_KEEP);
     askPending = null;
     askRender();
-    qaPersist();
+    /* handed the array and the target as they are right now — qaPersist must not
+       look at `current` again once its first await has yielded */
+    qaPersist(current.qa, tag);
   } catch (e) {
     /* an error painted onto a screen the user has left is noise, not news */
     if (askPending && askTagValid(tag)){
@@ -2393,20 +2412,26 @@ function exportHtml(lesson, b64){
 
 async function exportLesson(){
   if (!current) return;
+  /* Taken once, here. Reading `current` again after the awaits below was the same
+     mistake the save path made: an mp3 of several megabytes takes a moment to
+     read, and the share sheet stays open for as long as the user leaves it open.
+     Switch lessons in either window and the file came out with one lesson's audio
+     under another lesson's script and filename. */
+  const lesson = current.lesson, blob = current.blob;
   const btn = $("lExport");
   if (btn){ btn.disabled = true; btn.textContent = "만드는 중…"; }
   try {
     let b64 = "";
-    if (current.blob) b64 = bytesToB64(new Uint8Array(await current.blob.arrayBuffer()));
+    if (blob) b64 = bytesToB64(new Uint8Array(await blob.arrayBuffer()));
 
-    const name = "수업_" + current.lesson.date + ".html";
-    const file = new File([exportHtml(current.lesson, b64)], name, { type: "text/html" });
+    const name = "수업_" + lesson.date + ".html";
+    const file = new File([exportHtml(lesson, b64)], name, { type: "text/html" });
 
     let sent = false;
     if (navigator.canShare && navigator.share){
       try {
         if (navigator.canShare({ files: [file] })){
-          await navigator.share({ files: [file], title: current.lesson.dateLabel + " 스페인어 수업" });
+          await navigator.share({ files: [file], title: lesson.dateLabel + " 스페인어 수업" });
           sent = true;
         }
       } catch (e) { if (e && e.name === "AbortError") sent = true; }
