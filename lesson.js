@@ -788,9 +788,12 @@ function audioPlayer(lesson, blob, onTick){
   const a = new Audio();
   a.preload = "auto";
   a.src = url;
-  let timer = null, speed = 1;
+  let timer = null, speed = 1, dead = false;
 
-  const tick = () => onTick(a.currentTime * 1000, !a.paused);
+  /* destroy() pauses, and that "pause" event lands one task later — by then a
+     new lesson may already be mounted, and this tick would paint the old
+     audio's position onto the new script for a frame */
+  const tick = () => { if (!dead) onTick(a.currentTime * 1000, !a.paused); };
   const stopTimer = () => { if (timer){ clearInterval(timer); timer = null; } };
 
   a.addEventListener("timeupdate", tick);
@@ -820,6 +823,7 @@ function audioPlayer(lesson, blob, onTick){
     speedNow: () => speed,
     at: () => a.currentTime * 1000,
     destroy: () => {
+      dead = true;
       stopTimer();
       try { a.pause(); } catch (e) {}
       /* src="" would make the element load the page URL and throw; drop the
@@ -1156,13 +1160,16 @@ async function openLesson(force){
 async function makeLesson(rows){
   lessonCancelled = false;
   busy = true;
-  showError("");
-  lessonMessage("대본을 쓰는 중…", "오늘 대화 " + rows.length + "건을 수업으로 엮고 있습니다.");
-  $("lFoot").innerHTML = '<button class="mini" id="lCancel" type="button">그만두기</button>';
-  $("lCancel").onclick = () => { lessonCancelled = true; cancelTts(); lessonBusySub("그만두는 중…"); };
-  setStatus("수업 대본을 만드는 중…");
-
+  /* nothing between `busy = true` and this try: a throw in the setup below
+     would otherwise leave the flag stuck on, and a stuck `busy` silently
+     disables the microphone, the typing box and this button for good */
   try {
+    showError("");
+    lessonMessage("대본을 쓰는 중…", "오늘 대화 " + rows.length + "건을 수업으로 엮고 있습니다.");
+    $("lFoot").innerHTML = '<button class="mini" id="lCancel" type="button">그만두기</button>';
+    $("lCancel").onclick = () => { lessonCancelled = true; cancelTts(); lessonBusySub("그만두는 중…"); };
+    setStatus("수업 대본을 만드는 중…");
+
     const content = await lessonWriteScript(rows);
     if (lessonCancelled) throw new Error("__cancelled__");
 
@@ -1228,12 +1235,16 @@ async function makeLesson(rows){
 /* ---------------- past lessons ---------------- */
 
 async function showPast(){
-  let all = [];
-  try { all = await lessonList(); } catch (e) {}
+  let all = [], listErr = null;
+  try { all = await lessonList(); } catch (e) { listErr = e; }
   stopPlayer();
   current = null;
 
-  if (!all.length){
+  if (listErr){
+    /* "none saved" and "could not read what is saved" are different problems
+       and send the user looking in different places */
+    lessonMessage("저장된 수업을 읽지 못했습니다.", (listErr && listErr.message) || String(listErr));
+  } else if (!all.length){
     lessonMessage("저장된 수업이 없습니다.", "수업을 만들면 최근 " + KEEP_LESSONS + "개까지 여기에 남습니다.");
   } else {
     let html = '<div class="L-sec">지난 수업</div>';
