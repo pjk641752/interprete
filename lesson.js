@@ -1799,7 +1799,8 @@ function askSend(){
 }
 
 /* Borrows the interpreter's recorder: same auto-stop, same encoding, and only
-   the destination differs (see setRecTarget in app.js). */
+   the destination differs. The destination is handed to startRecording so that
+   it belongs to that one recording session (see recSession in app.js). */
 async function askMic(){
   if (askBusy) return;
   if (recording){                       // a second tap ends the recording
@@ -1811,13 +1812,11 @@ async function askMic(){
   if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
   if (player){ try { player.pause(); } catch (e) {} }
 
-  setRecTarget("ask");
   askRecording = true;
   askLock("rec");
-  await startRecording();
+  await startRecording("ask");
   if (!recording){                      // the microphone never opened
     askRecording = false;
-    setRecTarget("interpret");
     askLock("idle");
   }
 }
@@ -1827,13 +1826,15 @@ async function lessonAskAudio(b64, mime, ms){
   askRecording = false;
   await askAsk({ q: "", via: "voice", audio: { data: b64, mime: mime, ms: ms } });
 }
-function lessonAskTooShort(){
+function askVoiceError(msg){
   askRecording = false;
-  askPending = { q: "🎤 음성 질문", via: "voice", canRetry: false,
-                 err: "너무 짧습니다 — 다시 말해 주십시오." };
+  askPending = { q: "🎤 음성 질문", via: "voice", canRetry: false, err: msg };
   askRender();
   askLock("idle");
 }
+function lessonAskTooShort(){ askVoiceError("너무 짧습니다 — 다시 말해 주십시오."); }
+/* the recording could not be turned into something sendable */
+function lessonAskFailed(msg){ askVoiceError(msg || "녹음을 보내지 못했습니다."); }
 
 /* ---------------- the 🎧 button ---------------- */
 
@@ -2621,13 +2622,12 @@ async function lessonTestVoice(){
   const dlg = $("lesson");
   if (dlg) dlg.addEventListener("close", () => {
     stopPlayer();
-    /* a question being recorded when the screen closes is abandoned, not sent:
-       without this the interpreter would pick the audio up and translate it */
-    if (askRecording){
-      askRecording = false;
-      setRecTarget("discard");
-      stopRecording();
-    }
+    /* A question still being recorded — or already stopped and still being
+       converted — is abandoned, not sent. discardAskRecording marks that one
+       session, so it holds through the conversion and cannot be inherited by
+       the next translation. */
+    discardAskRecording();
+    askRecording = false;
     askLock("idle");
     try { window.speechSynthesis.cancel(); } catch (e) {}
   });

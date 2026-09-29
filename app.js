@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-09-30.3";
+const APP_VERSION = "2026-09-30.4";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -619,7 +619,28 @@ function stopLevelMeter(){
   el.lvl.style.width = "0%";
 }
 
-async function startRecording(){
+/* The recording in flight, and where it is going.
+
+   The destination is bound HERE, when the recording starts, and lives on this
+   object for as long as that one recording is being handled — including the
+   base64 conversion, which is asynchronous. It used to be a global flag read at
+   stop time, and that lost a recording's identity the moment it stopped: the
+   lesson closing during the conversion would set a "discard" that the finished
+   recording never consumed, and the NEXT ordinary translation silently threw
+   itself away. A destination that belongs to a session cannot be left behind
+   for someone else to pick up. */
+let recSession = null;
+
+/* Abandon a question being recorded or converted. Marks only that session, so
+   a translation recording started meanwhile is never touched. */
+function discardAskRecording(){
+  if (!recSession || recSession.target !== "ask") return false;
+  recSession.discarded = true;
+  if (recording) stopRecording();
+  return true;
+}
+
+async function startRecording(target){
   if (busy || recording) return;
   if (!settings.apiKey){ openSettings(); return; }
   showError("");
@@ -636,6 +657,7 @@ async function startRecording(){
     recorder.onstop = onRecordingStopped;
     recorder.start();
 
+    recSession = { target: target === "ask" ? "ask" : "interpret", discarded: false };
     recording = true; sawSpeech = false; silentSince = 0; startedAt = Date.now();
     voicedMs = 0; pauses = 0; lastTick = 0; wasVoiced = false;
     el.mic.classList.add("rec");
@@ -644,6 +666,7 @@ async function startRecording(){
     startLevelMeter(s);
     hardStop = setTimeout(() => { if (recording) stopRecording(); }, MAX_RECORD_MS);
   } catch (e) {
+    recSession = null;
     showError("마이크를 열지 못했습니다.\n" + (e && e.message ? e.message : e) +
       "\n\n주소가 https 로 시작해야 마이크가 열립니다. 브라우저 설정에서 이 사이트의 마이크 권한도 확인하십시오.");
     resetMic();
@@ -659,36 +682,51 @@ function stopRecording(){
   try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch (e) {}
 }
 
-/* Where the next finished recording goes. The lesson's question bar borrows
-   this recorder wholesale — same auto-stop, same level meter, same audio
-   encoding — and only the destination differs. One-shot on purpose: it is
-   cleared the moment a recording is handled, so a purpose can never leak into
-   whatever is recorded next. */
-let recTarget = "interpret";
-function setRecTarget(t){ recTarget = (t === "ask" || t === "discard") ? t : "interpret"; }
-
 async function onRecordingStopped(){
   const mime = baseMime(recorder && recorder.mimeType);
   const blob = new Blob(chunks, { type: mime });
   chunks = [];
-  const target = recTarget;
-  recTarget = "interpret";
 
-  /* the lesson screen was closed mid-question: throw the audio away rather than
-     hand it to the interpreter, which would translate it and log it as a turn */
-  if (target === "discard"){ resetMic(); return; }
+  /* A recording with no session predates this code path or arrived after a
+     failed open; treating it as a translation is the old, safe default. */
+  const sess = recSession || { target: "interpret", discarded: false };
+  /* released only once this recording is completely done with — the session has
+     to stay reachable across the await below so the lesson can still abandon it */
+  const release = () => { if (recSession === sess) recSession = null; };
+
+  if (sess.discarded){ release(); resetMic(); return; }
 
   if (durationMs < MIN_SPEECH_MS || blob.size < 1000){
+    release();
     setStatus("너무 짧습니다 — 다시 말해 주십시오");
     resetMic();
     /* the lesson screen covers the page, so setStatus above is invisible there
        and the question bar has to be told to unlock itself */
-    if (target === "ask" && typeof lessonAskTooShort === "function") lessonAskTooShort();
+    if (sess.target === "ask" && typeof lessonAskTooShort === "function") lessonAskTooShort();
     return;
   }
 
-  const b64 = await blobToBase64(blob);
-  if (target === "ask" && typeof lessonAskAudio === "function"){
+  let b64 = "";
+  try {
+    b64 = await blobToBase64(blob);
+  } catch (e) {
+    /* this used to reject out of an onstop handler, leaving the microphone stuck
+       mid-state and the question bar locked with nothing said */
+    release();
+    resetMic();
+    const why = (e && e.message) ? String(e.message) : "녹음을 읽지 못했습니다.";
+    if (sess.target === "ask" && typeof lessonAskFailed === "function") lessonAskFailed(why);
+    else { showError(why); setStatus("녹음을 읽지 못했습니다"); }
+    return;
+  }
+
+  /* Asked again on the far side of the conversion: the lesson may have been
+     closed while it ran, and the user who closed it does not want the question
+     sent. This is the window that used to strand a stale destination. */
+  if (sess.discarded){ release(); resetMic(); return; }
+  release();
+
+  if (sess.target === "ask" && typeof lessonAskAudio === "function"){
     resetMic();
     await lessonAskAudio(b64, mime, durationMs);
     return;
@@ -1161,7 +1199,7 @@ el.resetUsage.onclick = () => {
   refreshMeter(); refreshUsageDialog();
 };
 
-el.mic.onclick = () => { if (busy) return; recording ? stopRecording() : startRecording(); };
+el.mic.onclick = () => { if (busy) return; recording ? stopRecording() : startRecording("interpret"); };
 
 function autoGrow(){
   el.textIn.style.height = "auto";
