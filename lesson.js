@@ -897,6 +897,11 @@ const fmtClock = (ms) => {
 
 let player = null;
 
+/* 🔁: when the lesson ends it starts again from the top. Kept on its own key so
+   it survives a lesson being re-made and never touches the voice settings. */
+const LESSON_LOOP_KEY = "interp.lessonLoop";
+let lessonLoop = jget(LESSON_LOOP_KEY, false) === true;
+
 function clearMediaSession(){
   if (!("mediaSession" in navigator)) return;
   try { navigator.mediaSession.metadata = null; } catch (e) {}
@@ -920,6 +925,9 @@ function audioPlayer(lesson, blob, onTick){
   const a = new Audio();
   a.preload = "auto";
   a.src = url;
+  /* the element wraps to 0 by itself; the frame loop then reads position 0
+     and the highlight and bar follow it back to the top */
+  a.loop = lessonLoop;
   let raf = 0, speed = 1, dead = false;
 
   /* The player reports TIMELINE position, not file position: currentTime runs
@@ -976,6 +984,7 @@ function audioPlayer(lesson, blob, onTick){
     step: function (d){ this.nudge(d * 10); },
     speed: (v) => { speed = v; a.playbackRate = v; },
     speedNow: () => speed,
+    loop: (on) => { a.loop = !!on; },
     at: posMs,
     destroy: () => {
       dead = true;
@@ -1118,7 +1127,11 @@ function devicePlayer(lesson, onTick){
 
   function speakOne(){
     if (!alive || !running) return;
-    if (idx >= lesson.segments.length){ running = false; report(); return; }
+    if (idx >= lesson.segments.length){
+      /* 🔁 on: back to the first line instead of stopping */
+      if (!lessonLoop || !lesson.segments.length){ running = false; report(); return; }
+      idx = 0;
+    }
     const s = lesson.segments[idx];
     const mine = epoch;
     report();
@@ -1189,6 +1202,7 @@ function devicePlayer(lesson, onTick){
     step: (d) => jump(idx + d),
     speed: (v) => { rate = v; },
     speedNow: () => rate,
+    loop: () => {},                  // read from lessonLoop at the end of each pass
     at: posMs,
     destroy: () => { alive = false; halt(); }
   };
@@ -1262,6 +1276,8 @@ function renderTransport(){
       '<button class="L-b big" id="lPlay" type="button">&#9654;</button>' +
       '<button class="L-b" id="lFwd" type="button">' + (isDev ? "줄 &#9654;" : "+10초") + "</button>" +
       '<button class="L-b" id="lSpeed" type="button">1&times;</button>' +
+      '<button class="L-b' + (lessonLoop ? " on" : "") + '" id="lLoop" type="button" ' +
+        'aria-label="무한 반복" aria-pressed="' + lessonLoop + '">&#128257;</button>' +
     "</div>" +
     (isDev ? '<div class="L-warn">기기 음성으로 읽습니다. 화면을 끄거나 다른 앱으로 넘어가면 멈춥니다. ' +
              "끊기지 않게 들으시려면 설정에서 Cloud TTS 키를 넣으십시오.</div>" : "");
@@ -1274,6 +1290,13 @@ function renderTransport(){
     const next = SPEED_STEPS[(SPEED_STEPS.indexOf(player.speedNow()) + 1) % SPEED_STEPS.length];
     player.speed(next);
     $("lSpeed").innerHTML = next + "&times;";
+  };
+  $("lLoop").onclick = () => {
+    lessonLoop = !lessonLoop;
+    jset(LESSON_LOOP_KEY, lessonLoop);
+    if (player && player.loop) player.loop(lessonLoop);
+    $("lLoop").classList.toggle("on", lessonLoop);
+    $("lLoop").setAttribute("aria-pressed", String(lessonLoop));
   };
   $("lBar").onclick = (ev) => {
     if (!player) return;
@@ -1506,6 +1529,33 @@ const askAudioCache = new Map();
    meant as "stop" started a second question instead of ending the first. */
 const askOccupied = () => askBusy || askConverting || askRecording;
 
+/* The answers can take a third of the screen and never gave it back. Folded,
+   only one thin line stays above the question bar; the choice is remembered,
+   and asking something new unfolds it so the answer is never hidden. */
+const ASK_FOLD_KEY = "interp.askFold";
+let askFolded = jget(ASK_FOLD_KEY, false) === true;
+
+function askApplyFold(){
+  const box = $("lChat"), fold = $("lFold");
+  if (!box || !fold) return;
+  const n = ((current && current.qa) || []).length;
+  const has = !!box.innerHTML;
+  fold.hidden = !has;
+  box.classList.toggle("fold", askFolded);
+  fold.textContent = "💬 질문 " + n + "개 · " + (askFolded ? "펼치기 ▴" : "접기 ▾");
+  fold.setAttribute("aria-expanded", askFolded ? "false" : "true");
+}
+
+function askSetFold(on){
+  askFolded = !!on;
+  jset(ASK_FOLD_KEY, askFolded);
+  askApplyFold();
+  if (!askFolded){
+    const box = $("lChat");
+    if (box) box.scrollTop = box.scrollHeight;
+  }
+}
+
 /* Which lesson screen a question was asked from. A question is only ever
    delivered back to the same one: the screen must still be open, showing the
    same lesson record, and not have been re-mounted since. Everything else about
@@ -1641,6 +1691,7 @@ function askShow(on){
     const box = $("lChat");
     if (box) box.innerHTML = "";
   }
+  askApplyFold();
 }
 
 function askBubble(cls, inner){
@@ -1697,6 +1748,7 @@ function askRender(){
   };
 
   box.scrollTop = box.scrollHeight;
+  askApplyFold();
 }
 
 /* ---- speaking an answer ---- */
@@ -1843,6 +1895,8 @@ async function askAsk(pending){
 
   askBusy = true;
   askLock("think");
+  /* a new question is never asked into a folded panel */
+  if (askFolded) askSetFold(false);
   /* they stopped to ask about something — the lesson must not keep talking
      over the answer */
   if (player){ try { player.pause(); } catch (e) {} }
@@ -1970,6 +2024,7 @@ function askVoiceError(msg, tag){
   askConverting = false;
   if (!askTagValid(tag)){ askLock("idle"); return; }
   askPending = { q: "🎤 음성 질문", via: "voice", canRetry: false, err: msg };
+  if (askFolded) askSetFold(false);
   askRender();
   askLock("idle");
 }
@@ -2217,6 +2272,346 @@ function safeJson(obj){
     .replace(/\u2029/g, "\\u2029");
 }
 
+/* ---- asking from the exported file ----
+
+   The file asks exactly the way the lesson screen does: the same prompt, the
+   same context (whole lesson + the line playing + the last few turns), the same
+   answer format and the same bubbles. Rather than a second copy of that code,
+   the app's own functions are written into the file as source text.
+
+   The API key is NEVER written into the file — files get passed around on
+   KakaoTalk. The file asks for a key the first time it is used and keeps it in
+   that browser's own storage. */
+
+/* Function source, made safe to sit inside a <script> element: "</script" or
+   "<!--" anywhere in it (they only ever occur inside strings, regexes and
+   comments, where "<\/" means the same thing) would end or confuse the block. */
+function scriptSafe(js){
+  return String(js).replace(/<\/(script)/gi, "<\\/$1").replace(/<!--/g, "<\\!--");
+}
+function fnSource(fn, name){
+  const s = String(fn);
+  return /^(async\s+)?function\b/.test(s) ? s : "var " + name + " = " + s + ";";
+}
+
+/* Runs ONLY inside an exported file, never in the app: exportAskHtml writes it
+   into the file next to the app's own question functions and the names below
+   (current, player, ASK_MODEL, ...) are the ones that file defines. */
+function exportAskRuntime(){
+  const KEY_STORE = "interp.fileKey";
+  const QA_STORE = "interp.fileQA." + (current.lesson.date || "");
+  const q = $("lQ"), mic = $("lQMic"), send = $("lQSend"), box = $("lChat");
+  const keyRow = $("lKey"), keyIn = $("lKeyIn"), keyMsg = $("lKeyMsg");
+  const KEY_HINT = keyMsg.textContent;
+  let pending = null, busy = false, waiting = null;
+  let rec = null, recChunks = [], recStart = 0, recTimer = null, recStream = null;
+
+  const saved = jget(QA_STORE, []);
+  if (Array.isArray(saved)) current.qa = saved.slice(-ASK_KEEP);
+
+  function render(){
+    const qa = current.qa;
+    let html = "";
+    for (let i = 0; i < qa.length; i++){
+      const t = qa[i];
+      if (!t || !Array.isArray(t.parts)) continue;
+      html += askBubble("me", '<div class="Q-ko">' + esc(t.q || "") + "</div>");
+      html += askAnswerHtml(t.parts, i);
+    }
+    if (pending){
+      html += askBubble("me", '<div class="Q-ko">' +
+        esc(pending.via === "voice" && !pending.q ? "🎤 음성 질문" : pending.q) + "</div>");
+      html += pending.err
+        ? askBubble("err", '<div class="Q-ko">' + esc(pending.err) + "</div>" +
+            (pending.canRetry
+              ? '<div class="Q-tools"><button class="Q-retry" id="lQRetry" type="button">다시 시도</button></div>'
+              : ""))
+        : askBubble("", '<div class="Q-wait">생각 중…</div>');
+    }
+    box.innerHTML = html;
+    box.querySelectorAll(".Q-es").forEach((n) => {
+      n.onclick = () => askSpeakEs(n.getAttribute("data-say"));
+    });
+    box.querySelectorAll(".Q-say").forEach((b) => {
+      b.onclick = () => {
+        const t = current.qa[Number(b.getAttribute("data-i"))];
+        if (t) askSpeakDevice(t.parts);
+      };
+    });
+    const retry = $("lQRetry");
+    if (retry) retry.onclick = () => {
+      const again = pending;
+      if (!again) return;
+      pending = null;
+      ask(again);
+    };
+    box.scrollTop = box.scrollHeight;
+    askApplyFold();
+  }
+
+  function showError(p, msg){
+    pending = Object.assign({ q: "", via: "text", canRetry: false }, p, { err: msg });
+    if (askFolded) askSetFold(false);
+    render();
+  }
+
+  function askForKey(msg){
+    keyRow.hidden = false;
+    keyMsg.textContent = msg || KEY_HINT;
+    try { keyIn.focus(); } catch (e) {}
+  }
+
+  async function ask(p){
+    if (busy) return;
+    const key = jget(KEY_STORE, "");
+    if (!key){ waiting = p; askForKey(""); return; }
+
+    busy = true;
+    askLock("think");
+    if (askFolded) askSetFold(false);
+    try { player.pause(); } catch (e) {}
+    pending = Object.assign({ err: "", canRetry: true }, p);
+    if (!pending.playing) pending.playing = askPlayingJson();
+    render();
+
+    let badKey = false;
+    try {
+      const input = pending.audio
+        ? [{ type: "text", text: askContextJson(pending) },
+           { type: "audio", data: pending.audio.data, mime_type: pending.audio.mime }]
+        : [{ type: "text", text: askContextJson(pending) }];
+      const call = async () => {
+        const res = await fetch(API_URL, {
+          method: "POST",
+          headers: { "x-goog-api-key": key, "Content-Type": "application/json" },
+          body: JSON.stringify({
+            model: ASK_MODEL,
+            system_instruction: ASK_PROMPT,
+            input: input,
+            generation_config: { temperature: 0.35, thinking_level: "low" }
+          })
+        });
+        const raw = await res.text();
+        let json = null; try { json = JSON.parse(raw); } catch (e) {}
+        if (!res.ok){
+          const msg = (json && json.error && json.error.message) || raw.slice(0, 300);
+          badKey = res.status === 401 || res.status === 403 || (res.status === 400 && /api[ _-]?key/i.test(msg));
+          throw new Error((badKey ? "API 키가 맞지 않습니다. 아래에 다시 넣어주십시오.\n" : "") +
+                          "API " + res.status + "\n" + msg);
+        }
+        const text = extractText(json || {});
+        if (!text) throw new Error("답변이 비어 있습니다.");
+        return text.trim();
+      };
+      const reply = await Promise.race([
+        call(),
+        new Promise((_, rej) => setTimeout(
+          () => rej(new Error("답이 " + (ASK_TIMEOUT_MS / 1000) + "초 안에 오지 않았습니다.")),
+          ASK_TIMEOUT_MS))
+      ]);
+      const got = askParse(reply);
+      const shown = pending.via === "voice" ? (got.heard || "🎤 음성 질문") : pending.q;
+      current.qa.push({ q: shown, via: pending.via, parts: got.parts, at: new Date().toISOString() });
+      if (current.qa.length > ASK_KEEP) current.qa = current.qa.slice(-ASK_KEEP);
+      pending = null;
+      jset(QA_STORE, current.qa);
+      render();
+    } catch (e) {
+      if (pending){
+        pending.err = (e && e.message) ? String(e.message) : String(e);
+        render();
+      }
+      if (badKey) askForKey("API 키가 맞지 않습니다. 다시 넣어주십시오.");
+    } finally {
+      busy = false;
+      askLock("idle");
+    }
+  }
+
+  function sendText(){
+    const text = q.value.trim();
+    if (!text || busy || rec) return;
+    q.value = "";
+    ask({ q: text, via: "text" });
+  }
+  send.onclick = sendText;
+  q.onkeydown = (ev) => {
+    if (ev.key === "Enter" && !ev.shiftKey){ ev.preventDefault(); sendText(); }
+  };
+
+  $("lKeySave").onclick = () => {
+    const k = keyIn.value.trim();
+    if (!k){ askForKey(""); return; }
+    jset(KEY_STORE, k);
+    keyIn.value = "";
+    keyRow.hidden = true;
+    const p = waiting;
+    waiting = null;
+    if (p) ask(p);
+  };
+  keyIn.onkeydown = (ev) => {
+    if (ev.key === "Enter"){ ev.preventDefault(); $("lKeySave").click(); }
+  };
+
+  /* ---- the microphone: a plain start/stop recorder ----
+     Some browsers refuse the microphone to a page opened from a file. Then the
+     button goes away and the question bar is text only. */
+  const micOk = !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia &&
+                   typeof MediaRecorder !== "undefined");
+  if (!micOk) mic.hidden = true;
+
+  function stopRec(){
+    if (!rec) return;
+    if (recTimer){ clearTimeout(recTimer); recTimer = null; }
+    askLock("think");
+    try { rec.stop(); } catch (e) { recStopped(); }
+  }
+
+  async function recStopped(){
+    const r = rec;
+    rec = null;
+    const ms = Date.now() - recStart;
+    try { recStream.getTracks().forEach((t) => t.stop()); } catch (e) {}
+    recStream = null;
+    const mime = baseMime(r && r.mimeType);
+    const blob = new Blob(recChunks, { type: mime });
+    recChunks = [];
+    if (ms < 700 || blob.size < 1000){
+      askLock("idle");
+      showError({ q: "🎤 음성 질문", via: "voice" }, "너무 짧습니다 — 다시 말해 주십시오.");
+      return;
+    }
+    let b64 = "";
+    try { b64 = await blobToBase64(blob); }
+    catch (e) {
+      askLock("idle");
+      showError({ q: "🎤 음성 질문", via: "voice" }, "녹음을 읽지 못했습니다.");
+      return;
+    }
+    askLock("idle");
+    ask({ q: "", via: "voice", audio: { data: b64, mime: mime, ms: ms } });
+  }
+
+  mic.onclick = async () => {
+    if (rec){ stopRec(); return; }
+    if (busy) return;
+    if (!jget(KEY_STORE, "")){ askForKey(""); return; }
+    try { player.pause(); } catch (e) {}
+    try {
+      recStream = await navigator.mediaDevices.getUserMedia({
+        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
+      });
+    } catch (e) {
+      mic.hidden = true;
+      showError({ q: "🎤 음성 질문", via: "voice" },
+        "이 브라우저는 파일에서 마이크를 열 수 없습니다. 글로 물어봐 주십시오.");
+      return;
+    }
+    const want = pickMime();
+    try { rec = want ? new MediaRecorder(recStream, { mimeType: want }) : new MediaRecorder(recStream); }
+    catch (e) { rec = new MediaRecorder(recStream); }
+    recChunks = [];
+    rec.ondataavailable = (e) => { if (e.data && e.data.size) recChunks.push(e.data); };
+    rec.onstop = recStopped;
+    rec.start();
+    recStart = Date.now();
+    askLock("rec");
+    recTimer = setTimeout(stopRec, 60000);
+  };
+
+  $("lFold").onclick = () => askSetFold(!askFolded);
+  askLock("idle");
+  render();
+}
+
+/* the question panel's styles, the same as the lesson screen's */
+function exportAskCss(){
+  return [
+'.Q-chat{max-height:38dvh;overflow-y:auto;padding:9px 13px 3px;border-top:1px solid var(--line);',
+'-webkit-overflow-scrolling:touch}',
+'.Q-chat:empty,.Q-chat.fold{display:none}',
+'.Q-fold{display:block;width:100%;border:none;border-top:1px solid var(--line);background:var(--surface);',
+'color:var(--dim);font-size:11.5px;font-weight:700;padding:6px 13px;cursor:pointer;font-family:inherit}',
+'.Q-fold[hidden],.Q-key[hidden],.Q-mic[hidden]{display:none}',
+'.Q-turn{display:flex;margin-bottom:9px}',
+'.Q-turn.me{justify-content:flex-end}',
+'.Q-bub{max-width:86%;border:1px solid var(--line);background:var(--surface-2);',
+'border-radius:13px;padding:9px 11px;font-size:13.5px;line-height:1.6;word-break:break-word}',
+'.Q-turn.me .Q-bub{background:#1b2b40;border-color:#31506f}',
+'.Q-turn.err .Q-bub{background:#2a1618;border-color:#5a2b2f;color:#ffc9c9}',
+'.Q-ko{color:var(--text);white-space:pre-wrap}',
+'.Q-es{display:block;color:var(--es);font-weight:650;font-size:15px;margin:5px 0 2px;cursor:pointer}',
+'.Q-tools{display:flex;gap:6px;margin-top:7px}',
+'.Q-say,.Q-retry{border:1px solid var(--line);background:transparent;color:var(--dim);border-radius:8px;',
+'padding:3px 8px;font-size:11px;font-weight:700;cursor:pointer;font-family:inherit}',
+'.Q-wait{font-size:12.5px;color:var(--dim)}',
+'.Q-ask{display:flex;align-items:center;gap:7px;padding:9px 13px calc(9px + env(safe-area-inset-bottom));',
+'border-top:1px solid var(--line);background:var(--surface)}',
+'.Q-in{flex:1;min-width:0;background:var(--surface-2);border:1px solid var(--line);color:var(--text);',
+'border-radius:11px;padding:10px 12px;font-size:14px;font-family:inherit}',
+'.Q-in:focus{outline:none;border-color:#3d4a5a}',
+'.Q-mic,.Q-send{flex:none;border:1px solid var(--line);background:var(--surface-2);color:var(--muted);',
+'border-radius:11px;padding:9px 12px;font-size:15px;cursor:pointer;font-family:inherit}',
+'.Q-mic.rec{background:#7f1d2d;border-color:#a3263a;color:#fff}',
+'.Q-send{background:#2563eb;border-color:#2563eb;color:#fff;font-weight:700;font-size:13px}',
+'.Q-mic:disabled,.Q-send:disabled,.Q-in:disabled{opacity:.5;cursor:default}',
+'.Q-key{padding:10px 13px;border-top:1px solid var(--line);background:var(--surface)}',
+'.Q-key-t{font-size:12px;color:var(--muted);line-height:1.5;margin-bottom:8px;white-space:pre-wrap}',
+'.Q-key-r{display:flex;gap:7px}'
+  ].join("\n");
+}
+
+/* The question panel and the code behind it. Every value goes in through
+   safeJson and every function through scriptSafe, so nothing in either can
+   close the <script> element early. */
+function exportAskHtml(){
+  const v = (name, value) => "var " + name + " = " + safeJson(value) + ";";
+  const fns = [
+    fnSource(cleanStr, "cleanStr"), lessonExtractJson, askParse, rowAt,
+    askLessonJson, askPlayingJson, askHistoryJson, askContextJson,
+    askBubble, askAnswerHtml, askLock, askApplyFold, askSetFold,
+    devVoiceList, devLangScore, devPickVoice, askSpeakEs, askSpeakDevice,
+    jget, jset, esc, extractText, pickMime, fnSource(baseMime, "baseMime"), blobToBase64,
+    exportAskRuntime
+  ].map((f) => (typeof f === "string" ? f : String(f)));
+
+  const js = [
+    "(function(){",
+    '"use strict";',
+    v("ASK_PROMPT", ASK_PROMPT),
+    v("ASK_TURNS", ASK_TURNS), v("ASK_KEEP", ASK_KEEP), v("ASK_TIMEOUT_MS", ASK_TIMEOUT_MS),
+    v("ASK_MODEL", DEFAULTS.model), v("API_URL", API_URL),
+    v("DEV_LANG_RANK", DEV_LANG_RANK), v("ASK_FOLD_KEY", ASK_FOLD_KEY),
+    "var lset = {};",
+    "var $ = function(id){ return document.getElementById(id); };",
+    "var current = { lesson: window.__lesson.data, qa: [] };",
+    "var player = { at: function(){ return window.__lesson.player.at(); },",
+    "               pause: function(){ window.__lesson.player.pause(); } };",
+    fns.join("\n"),
+    "var askFolded = jget(ASK_FOLD_KEY, false) === true;",
+    "exportAskRuntime();",
+    "})();"
+  ].join("\n");
+
+  return [
+'<button class="Q-fold" id="lFold" type="button" hidden></button>',
+'<div class="Q-chat" id="lChat"></div>',
+'<div class="Q-key" id="lKey" hidden>',
+'<div class="Q-key-t" id="lKeyMsg">질문하려면 Gemini API 키가 필요합니다. 이 기기의 브라우저에만 저장되고, 파일 안에는 들어가지 않습니다.</div>',
+'<div class="Q-key-r"><input class="Q-in" id="lKeyIn" type="password" placeholder="Gemini API 키" ',
+'autocomplete="off" spellcheck="false"><button class="Q-send" id="lKeySave" type="button">저장</button></div>',
+'</div>',
+'<div class="Q-ask" id="lAsk">',
+'<input class="Q-in" id="lQ" type="text" placeholder="궁금한 걸 물어보세요" autocomplete="off" spellcheck="false" enterkeyhint="send">',
+'<button class="Q-mic" id="lQMic" type="button" aria-label="말로 질문">🎤</button>',
+'<button class="Q-send" id="lQSend" type="button">질문</button>',
+'</div>',
+'<script>',
+scriptSafe(js),
+'<\/script>'
+  ].join("\n");
+}
+
 /* Everything inline: the script, the audio, the timeline and a player.
    No external reference at all, so file:// on a PC works the same as a phone. */
 function exportHtml(lesson, b64){
@@ -2278,6 +2673,8 @@ function exportHtml(lesson, b64){
 '.row.full .es,.row.slow .es{font-size:16px}',
 '.warn{font-size:11.5px;color:#e8d5a8;background:rgba(255,209,102,.07);',
 'border:1px solid rgba(255,209,102,.22);border-radius:10px;padding:8px 10px;margin-top:9px;line-height:1.5}',
+'.b.on{background:rgba(93,219,164,.14);border-color:var(--ok);color:var(--ok)}',
+exportAskCss(),
 '</style></head><body>',
 '<header><h1>' + esc(lesson.dateLabel) + ' 스페인어 수업</h1>',
 '<div class="sub">단어 ' + lesson.counts.words + ' · 숙어 ' + lesson.counts.idioms +
@@ -2291,6 +2688,7 @@ function exportHtml(lesson, b64){
 '<button class="b big" id="play" type="button">&#9654;</button>',
 '<button class="b" id="fwd" type="button">' + (b64 ? "+10초" : "줄 &#9654;") + '</button>',
 '<button class="b" id="spd" type="button">1&times;</button>',
+'<button class="b" id="loop" type="button" aria-label="무한 반복" aria-pressed="false">&#128257;</button>',
 '</div>',
 (b64 ? '' : '<div class="warn">이 파일에는 녹음된 소리가 들어 있지 않고, 여는 기기의 음성으로 읽습니다. ' +
             '스페인어와 한국어 음성이 깔린 기기에서 열어주십시오. 화면을 끄면 멈춥니다.</div>'),
@@ -2350,6 +2748,10 @@ function exportHtml(lesson, b64){
 'var barEl = document.getElementById("bar"), atEl = document.getElementById("at");',
 'var playEl = document.getElementById("play"), spdEl = document.getElementById("spd");',
 'var STEPS = [0.8, 1, 1.2], P = null;',
+'/* 🔁 is remembered by whatever this browser lets a file keep; if it lets it',
+'   keep nothing, the button still works for as long as the file is open */',
+'var LOOP = false;',
+'try { LOOP = localStorage.getItem("interp.lessonLoop") === "true"; } catch (e){}',
 '/* tick runs once per animation frame, so nothing is written unless it changed:',
 '   re-parsing innerHTML and re-setting the same width string 60 times a second',
 '   is pure waste on a phone. */',
@@ -2373,6 +2775,7 @@ function exportHtml(lesson, b64){
 '    a.src = URL.createObjectURL(new Blob([u], { type: "audio/mpeg" }));',
 '  } catch (e){ a.src = dataUri(); fellBack = true; }',
 '  a.addEventListener("error", function(){ if (!fellBack){ fellBack = true; a.src = dataUri(); } });',
+'  a.loop = LOOP;',
 '  /* currentTime runs D.delayMs ahead of the script because of the mp3 codec',
 '     delay, so reads subtract it and seeks add it back. */',
 '  var pos = function(){ return Math.max(0, a.currentTime*1000 - D.delayMs); };',
@@ -2389,7 +2792,8 @@ function exportHtml(lesson, b64){
 '  P = { toggle: function(){ a.paused ? a.play() : a.pause(); },',
 '        seek: function(ms){ try { a.currentTime = (Math.max(0, ms) + D.delayMs)/1000; } catch (e){} t(); },',
 '        step: function(d){ P.seek(pos() + d*10000); },',
-'        speed: function(v){ sp = v; a.playbackRate = v; }, now: function(){ return sp; } };',
+'        speed: function(v){ sp = v; a.playbackRate = v; }, now: function(){ return sp; },',
+'        loop: function(on){ a.loop = !!on; }, at: pos, pause: function(){ a.pause(); } };',
 '} else {',
 '  var idx = 0, run = false, rate = 1, wt = null, epoch = 0;',
 '  /* Naming the voice is what stops the engine reading Spanish with a Korean',
@@ -2427,7 +2831,9 @@ function exportHtml(lesson, b64){
 '  var est = function(s){ return Math.max(500, s.text.length*(s.speaker === "es" ? 68 : 96)/(s.rate||1)); };',
 '  var step1 = function(){',
 '    if (!run) return;',
-'    if (idx >= D.segments.length){ run = false; rep(); return; }',
+'    if (idx >= D.segments.length){',
+'      if (!LOOP || !D.segments.length){ run = false; rep(); return; }',
+'      idx = 0; }',
 '    var s = D.segments[idx], moved = false, mine = epoch;',
 '    rep();',
 '    var go = function(){ if (moved || mine !== epoch) return; moved = true; if (!run) return;',
@@ -2457,7 +2863,8 @@ function exportHtml(lesson, b64){
 '          for (var i2 = 0; i2 < D.segments.length; i2++) if (D.segments[i2].start <= ms) k = i2;',
 '          jump(k); },',
 '        step: function(d){ jump(idx + d); },',
-'        speed: function(v){ rate = v; }, now: function(){ return rate; } };',
+'        speed: function(v){ rate = v; }, now: function(){ return rate; },',
+'        loop: function(){}, at: pos, pause: function(){ if (run){ halt(); rep(); } } };',
 '}',
 '',
 'playEl.onclick = function(){ P.toggle(); };',
@@ -2465,6 +2872,11 @@ function exportHtml(lesson, b64){
 'document.getElementById("fwd").onclick = function(){ P.step(1); };',
 'spdEl.onclick = function(){ var n = STEPS[(STEPS.indexOf(P.now()) + 1) % STEPS.length];',
 '  P.speed(n); spdEl.innerHTML = n + "&times;"; };',
+'var loopEl = document.getElementById("loop");',
+'var paintLoop = function(){ loopEl.classList.toggle("on", LOOP); loopEl.setAttribute("aria-pressed", String(LOOP)); };',
+'loopEl.onclick = function(){ LOOP = !LOOP; P.loop(LOOP); paintLoop();',
+'  try { localStorage.setItem("interp.lessonLoop", String(LOOP)); } catch (e){} };',
+'paintLoop();',
 'barEl.onclick = function(ev){ var r2 = barEl.getBoundingClientRect();',
 '  P.seek(Math.max(0, Math.min(1, (ev.clientX - r2.left)/r2.width)) * D.totalMs); };',
 'body.querySelectorAll(".row").forEach(function(b){',
@@ -2474,11 +2886,10 @@ function exportHtml(lesson, b64){
 '  current: function(){ return cur; } };',
 'tick(0, false);',
 '})();',
-'<\/script>',
-'</body></html>'
+'<\/script>'
   ].join("\n");
 
-  return head + "\n" + player;
+  return head + "\n" + player + "\n" + exportAskHtml() + "\n</body></html>";
 }
 
 async function exportLesson(){
@@ -2773,6 +3184,8 @@ async function lessonTestVoice(){
   if (qSend) qSend.onclick = askSend;
   const qMic = $("lQMic");
   if (qMic) qMic.onclick = () => { askMic().catch(() => {}); };
+  const qFold = $("lFold");
+  if (qFold) qFold.onclick = () => askSetFold(!askFolded);
   const test = $("lTestVoice");
   if (test) test.onclick = lessonTestVoice;
   const tryEs = $("lTryEs");

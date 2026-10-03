@@ -218,7 +218,12 @@
   /* asking the lesson a question */
   .Q-chat{max-height:38dvh;overflow-y:auto;padding:9px 13px 3px;border-top:1px solid var(--line);
     -webkit-overflow-scrolling:touch}
-  .Q-chat:empty{display:none}
+  .Q-chat:empty,.Q-chat.fold{display:none}
+  .Q-fold{display:block;width:100%;border:none;border-top:1px solid var(--line);background:var(--surface);
+    color:var(--dim);font-size:11.5px;font-weight:700;padding:6px 13px;cursor:pointer;font-family:inherit}
+  .Q-fold[hidden]{display:none}
+  .Q-fold:active{background:var(--surface-2)}
+  .L-b.on{background:rgba(93,219,164,.14);border-color:var(--ok);color:var(--ok)}
   .Q-turn{display:flex;margin-bottom:9px}
   .Q-turn.me{justify-content:flex-end}
   .Q-bub{max-width:86%;border:1px solid var(--line);background:var(--surface-2);
@@ -434,6 +439,7 @@
     <div class="L-ctl" id="lCtl"></div>
     <div class="L-notice" id="lNotice"></div>
     <div class="L-body" id="lBody"></div>
+    <button class="Q-fold" id="lFold" type="button" hidden></button>
     <div class="Q-chat" id="lChat"></div>
     <div class="Q-ask" id="lAsk" hidden>
       <input class="Q-in" id="lQ" type="text" placeholder="궁금한 걸 물어보세요"
