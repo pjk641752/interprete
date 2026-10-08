@@ -60,12 +60,15 @@ const P = {
   full: 4.0,
   reviewEs: 0.6, reviewKo: 0.8,
   outro: 0.4,
+  quizThink: 3.0,              // 0교시: the Korean meaning, then time to say it yourself
+  quizFollow: 2.0,             // after the Spanish answer, time to repeat it
   section: 1.0                 // added on top, at a section boundary
 };
 
 const SEC = {
   intro:  { id: "intro",  title: "시작" },
-  words:  { id: "words",  title: "1교시 · 오늘의 단어" },
+  yday:   { id: "yday",   title: "0교시 · 어제 복습" },     // the date is added per lesson
+  words: { id: "words",  title: "1교시 · 오늘의 단어" },
   idioms: { id: "idioms", title: "2교시 · 연계 숙어" },
   sents:  { id: "sents",  title: "3교시 · 문장 해부" },
   frames: { id: "frames", title: "4교시 · 말의 뼈대" },
@@ -411,9 +414,149 @@ function sayKo(s){
   return String(s || "").replace(/\s*~\s*/g, " 뭐뭐 ").replace(/\s+/g, " ").trim();
 }
 
+/* ---------------- 0교시 — yesterday's review ----------------
+
+   Built by code from the previous saved lesson — no extra Gemini call. It reads
+   that lesson's display rows, whose sectionId/kind/es/ko have been the same
+   since the first version, so a lesson from before 4교시 existed simply has no
+   frames to offer. Words are never reviewed here: sentences, expressions and
+   frames are. What the user asked about yesterday comes first. */
+const YDAY_SENTS = 2, YDAY_EXPR_MIN = 3, YDAY_EXPR_MAX = 6;
+const YDAY_MAX_MS = 270000;         // about four and a half minutes, everything in
+const YDAY_PRI = { frame: 1, idiom: 2, sent: 3 };
+
+/* lower case, Spanish accents and punctuation gone; Hangul is put back together */
+function reviewKey(s){
+  return String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").normalize("NFC")
+    .toLowerCase().replace(/[…~¿?¡!.,;:"'«»()\[\]\-]/g, " ").replace(/\s+/g, " ").trim();
+}
+
+/* the reviewable items of a saved lesson, in the order they were taught */
+function reviewItemsFrom(rec){
+  const rows = rec && rec.lesson && Array.isArray(rec.lesson.rows) ? rec.lesson.rows : [];
+  const out = [], seen = new Set();
+  const add = (it) => {
+    const k = reviewKey(it.es);
+    if (!k || !it.ko || seen.has(k)) return;
+    seen.add(k);
+    out.push(Object.assign(it, { key: k, order: out.length }));
+  };
+  const isFrameHead = (r) => r && r.sectionId === "frames" && r.kind === "pair" &&
+    (r.badge === "×2" || r.badge === "어제 복습");
+  for (let i = 0; i < rows.length; i++){
+    const r = asObj(rows[i]);
+    if (!r) continue;
+    const es = cleanStr(r.es), ko = cleanStr(r.ko);
+    if (!es || !ko) continue;
+    if (isFrameHead(r)){
+      /* one example to go with it: a swapped one first, else the real one */
+      let swap = null, real = null;
+      for (let j = i + 1; j < rows.length && asObj(rows[j]) && rows[j].sectionId === "frames" &&
+                          !isFrameHead(rows[j]); j++){
+        const x = rows[j], xe = cleanStr(x.es), xk = cleanStr(x.ko);
+        if (x.kind !== "pair" || !xe || !xk) continue;
+        if (!swap && x.badge === "바꿔 끼우기") swap = { es: xe, ko: xk };
+        if (!real && x.badge === "오늘 문장") real = { es: xe, ko: xk };
+      }
+      add({ type: "frame", es: es.replace(/\s*…$/, ""), show: es, ko: ko, ex: swap || real });
+    } else if (r.sectionId === "idioms" && r.kind === "pair"){
+      add({ type: "idiom", es: es, show: es, ko: ko, ex: null });
+    } else if (r.sectionId === "sents" && r.kind === "full"){
+      add({ type: "sent", es: es, show: es, ko: ko, ex: null });
+    }
+  }
+  return out;
+}
+
+/* what was asked about that lesson: the questions, and the Spanish in the answers */
+function reviewAsked(qa){
+  const es = [], ko = [];
+  for (const t of (Array.isArray(qa) ? qa : [])){
+    if (!asObj(t)) continue;
+    const q = reviewKey(t.q);
+    if (q){ es.push(" " + q + " "); ko.push(q); }
+    for (const p of (Array.isArray(t.parts) ? t.parts : [])){
+      if (p && p.lang === "es"){ const k = reviewKey(p.text); if (k) es.push(" " + k + " "); }
+    }
+  }
+  return { es: es, ko: ko };
+}
+function reviewHit(it, asked){
+  const k = it.key, kk = reviewKey(it.ko);
+  return asked.es.some((a) => (k.length >= 3 && a.indexOf(" " + k + " ") >= 0) ||
+                              (a.trim().length >= 6 && (" " + k + " ").indexOf(a) >= 0)) ||
+         (kk.length >= 3 && asked.ko.some((a) => a.indexOf(kk) >= 0));
+}
+
+/* what one item says aloud: meaning, a gap to answer in, the answer, a gap to repeat */
+function reviewSegs(it){
+  const out = [
+    { speaker: "ko", text: sayKo(it.ko), pause: P.quizThink },
+    { speaker: "es", text: it.es, pause: it.type === "sent" ? P.full : P.quizFollow }
+  ];
+  if (it.ex){
+    out.push({ speaker: "es", text: it.ex.es, pause: P.frameEs, ex: true });
+    out.push({ speaker: "ko", text: it.ex.ko, pause: P.frameKo, ex: true });
+  }
+  return out;
+}
+const reviewMs = (list) => list.reduce((n, s) => n + estimateMs(s) + s.pause * 1000, 0);
+
+const REVIEW_HOW = "한국어 뜻을 듣고, 3초 안에 스페인어로 떠올려 말해 보세요. 그다음 정답을 듣고 따라 하세요.";
+const REVIEW_END = "좋아요. 이제 오늘 수업이에요.";
+
+/* The plan for 0교시, or null. `iso` is today's study day; `prev` the saved
+   record to review — anything malformed in it is skipped, never thrown. */
+function reviewPlan(prev, iso){
+  if (!asObj(prev) || !prev.date || !(String(prev.date) < iso)) return null;
+  const all = reviewItemsFrom(prev);
+  if (!all.length) return null;
+  const asked = reviewAsked(prev.qa);
+  for (const it of all) it.hit = reviewHit(it, asked);
+  const rank = (it) => (it.hit ? 0 : YDAY_PRI[it.type]);
+  const sorted = all.slice().sort((a, b) => rank(a) - rank(b) || a.order - b.order);
+
+  const d = new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)) - 1, 12);
+  const yesterday = studyDate(d) === String(prev.date);
+  const label = (prev.lesson && cleanStr(prev.lesson.dateLabel)) ||
+    (Number(String(prev.date).slice(5, 7)) + "월 " + Number(String(prev.date).slice(8, 10)) + "일");
+  const lead = (yesterday ? "먼저 어제 배운 표현을 복습할게요. " : "먼저 지난 " + label + " 수업을 복습할게요. ") + REVIEW_HOW;
+
+  const fixedMs = reviewMs([{ speaker: "ko", text: lead, pause: P.lead },
+                            { speaker: "ko", text: REVIEW_END, pause: P.section }]);
+  const take = [];
+  let ms = fixedMs, nS = 0, nE = 0;
+  const fits = (it) => ms + reviewMs(reviewSegs(it)) <= YDAY_MAX_MS;
+  for (const it of sorted){
+    const sent = it.type === "sent";
+    if (sent ? nS >= YDAY_SENTS : nE >= YDAY_EXPR_MAX) continue;
+    if (!fits(it)) continue;
+    take.push(it);
+    ms += reviewMs(reviewSegs(it));
+    if (sent) nS++; else nE++;
+  }
+  /* at least one sentence when there was one, if the expressions can spare a place */
+  const firstSent = sorted.find((it) => it.type === "sent");
+  if (!nS && firstSent && nE > YDAY_EXPR_MIN){
+    for (let i = take.length - 1; i >= 0; i--){
+      if (take[i].hit) continue;
+      const out = take[i];
+      const was = ms;
+      ms += reviewMs(reviewSegs(firstSent)) - reviewMs(reviewSegs(out));
+      if (ms <= YDAY_MAX_MS){ take.splice(i, 1); take.push(firstSent); nS++; nE--; }
+      else ms = was;
+      break;
+    }
+  }
+  if (!take.length) return null;
+  return { date: String(prev.date), label: label, yesterday: yesterday, lead: lead,
+           items: take, estMs: ms };
+}
+
 /* The content becomes a flat segment list (what gets spoken) plus display rows
-   (what gets shown). A three-times repeat is several segments inside one row. */
-function lessonBuild(content, when){
+   (what gets shown). A three-times repeat is several segments inside one row.
+   `prev`, when given, is the saved lesson before this one: 0교시 reviews it. */
+function lessonBuild(content, when, prev){
   const segs = [], rows = [];
   let sid = 0, gid = 0;
 
@@ -460,12 +603,40 @@ function lessonBuild(content, when){
   const iso = studyDate(when);
   const dateLabel = Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) + "일";
 
+  const plan = reviewPlan(prev, iso);
+  const R = plan ? plan.items.length : 0;
+  /* something 0교시 just reviewed is said once today, not three times */
+  const reviewed = new Set(plan ? plan.items.map((it) => it.key) : []);
+  const again = (es) => reviewed.size > 0 && reviewed.has(reviewKey(String(es || "").replace(/\s*…$/, "")));
+
   /* intro */
-  const introText = dateLabel + " 스페인어 수업입니다. 오늘은 단어 " + W + "개, 보너스 숙어 " +
+  const introText = dateLabel + " 스페인어 수업입니다. " +
+    (plan ? "먼저 " + (plan.yesterday ? "어제" : "지난 수업에서") + " 배운 표현 " + R + "개를 복습하고, 오늘은 " : "오늘은 ") +
+    "단어 " + W + "개, 보너스 숙어 " +
     I + "개, 문장 " + S + "개" + (F ? ", 말의 뼈대 " + F + "개" : "") +
     "입니다. 눈 감고, 들리는 대로 따라 하세요.";
   let g = row(SEC.intro, "say", { ko: introText });
   seg(SEC.intro, g, "ko", introText, P.intro);
+
+  /* 0교시 — yesterday, as a quiz: the meaning, a gap to answer, the answer.
+     On screen the Spanish stays covered until its segment plays. */
+  if (plan){
+    const Y = { id: SEC.yday.id, title: SEC.yday.title + " (" + plan.label + ")" };
+    const BADGE = { frame: "어제 뼈대", idiom: "어제 숙어", sent: "어제 문장" };
+    g = row(Y, "say", { ko: plan.lead });
+    seg(Y, g, "ko", plan.lead, P.lead);
+    for (const it of plan.items){
+      const parts = reviewSegs(it);
+      g = row(Y, "pair", { es: it.show, ko: it.ko, badge: BADGE[it.type], quiz: true });
+      let exRow = null;
+      for (const s of parts){
+        if (s.ex && !exRow) exRow = row(Y, "pair", { es: it.ex.es, ko: it.ex.ko, badge: "바꿔 끼우기" });
+        seg(Y, s.ex ? exRow : g, s.speaker, s.text, s.pause);
+      }
+    }
+    g = row(Y, "say", { ko: REVIEW_END });
+    seg(Y, g, "ko", REVIEW_END, P.lead);
+  }
 
   /* 1교시 — each word three times */
   content.words.forEach((w, i) => {
@@ -473,10 +644,11 @@ function lessonBuild(content, when){
     g = row(SEC.words, "lead", { ko: lead });
     seg(SEC.words, g, "ko", lead, P.lead);
 
-    g = row(SEC.words, "pair", { es: w.es, ko: w.ko, badge: "×3" });
-    for (let k = 0; k < 3; k++){
+    const n = again(w.es) ? 1 : 3;
+    g = row(SEC.words, "pair", { es: w.es, ko: w.ko, badge: n === 1 ? "어제 복습" : "×3" });
+    for (let k = 0; k < n; k++){
       seg(SEC.words, g, "es", w.es, P.wordEs);
-      seg(SEC.words, g, "ko", w.ko, k === 2 ? P.wordKoLast : P.wordKo);
+      seg(SEC.words, g, "ko", w.ko, k === n - 1 ? P.wordKoLast : P.wordKo);
     }
     enLine(SEC.words, w);
   });
@@ -487,12 +659,13 @@ function lessonBuild(content, when){
     g = row(SEC.idioms, "lead", { ko: lead, from: x.from });
     seg(SEC.idioms, g, "ko", lead, P.lead);
 
-    g = row(SEC.idioms, "pair", { es: x.es, ko: x.ko, badge: "×3", from: x.from });
-    for (let k = 0; k < 3; k++){
+    const n = again(x.es) ? 1 : 3;
+    g = row(SEC.idioms, "pair", { es: x.es, ko: x.ko, badge: n === 1 ? "어제 복습" : "×3", from: x.from });
+    for (let k = 0; k < n; k++){
       seg(SEC.idioms, g, "es", x.es, P.wordEs);
-      seg(SEC.idioms, g, "ko", x.ko, k === 2 ? P.wordKoLast : P.wordKo);
+      seg(SEC.idioms, g, "ko", x.ko, k === n - 1 ? P.wordKoLast : P.wordKo);
     }
-    enLine(SEC.idioms, x);
+    if (n === 3) enLine(SEC.idioms, x);
   });
 
   /* 3교시 — a sentence taken apart, then put back together */
@@ -532,6 +705,21 @@ function lessonBuild(content, when){
      keep while swapping the verb. Meaning, today's real use, swapped examples,
      then the same frame for each person. */
   frames.forEach((f, i) => {
+    /* reviewed in 0교시 a few minutes ago: once, short, and today's real use only */
+    if (again(f.es)){
+      const lead = ordKo(i + 1) + " 뼈대. " + f.ko + ". 아까 어제 복습에서 했던 틀이에요.";
+      g = row(SEC.frames, "lead", { ko: lead });
+      seg(SEC.frames, g, "ko", sayKo(lead), P.lead);
+      g = row(SEC.frames, "pair", { es: f.type === "link" ? f.es : f.es + " …", ko: f.ko, badge: "어제 복습" });
+      seg(SEC.frames, g, "es", f.es, P.frameEs);
+      seg(SEC.frames, g, "ko", sayKo(f.ko), P.frameKo);
+      if (f.today){
+        g = row(SEC.frames, "pair", { es: f.today.es, ko: f.today.ko, badge: "오늘 문장" });
+        seg(SEC.frames, g, "es", f.today.es, P.frameEs);
+        seg(SEC.frames, g, "ko", f.today.ko, P.frameKo);
+      }
+      return;
+    }
     const lead = ordKo(i + 1) + " 뼈대. " + (f.type === "link" ? "이어 주는 말, " : "") + f.ko + "." +
       (f.note ? " " + f.note : "") +
       (f.today ? "" : " 오늘 문장에는 없었지만, 오늘 말에 붙여 쓰기 좋은 틀이에요.");
@@ -585,7 +773,8 @@ function lessonBuild(content, when){
 
   return {
     date: iso, dateLabel: dateLabel,
-    counts: { words: W, idioms: I, sentences: S, frames: F },
+    counts: Object.assign({ words: W, idioms: I, sentences: S, frames: F }, plan ? { review: R } : {}),
+    reviewOf: plan ? plan.date : "",
     segments: segs, rows: rows
   };
 }
@@ -616,6 +805,10 @@ function lessonTimeline(lesson, sr){
   const first = {};
   for (const s of segs) if (!(s.gid in first)) first[s.gid] = s.start;
   for (const r of lesson.rows) r.start = first[r.gid] != null ? first[r.gid] : 0;
+  /* a 0교시 quiz line uncovers its Spanish when the Spanish starts playing */
+  const firstEs = {};
+  for (const s of segs) if (s.speaker === "es" && !(s.gid in firstEs)) firstEs[s.gid] = s.start;
+  for (const r of lesson.rows) if (r.quiz) r.reveal = firstEs[r.gid] != null ? firstEs[r.gid] : r.start;
   for (let i = 0; i < lesson.rows.length; i++){
     lesson.rows[i].until = (i + 1 < lesson.rows.length) ? lesson.rows[i + 1].start : total;
   }
@@ -1137,6 +1330,15 @@ async function lessonList(){
     return all;
   } finally { db.close(); }
 }
+/* The newest saved lesson from a study day before `iso` that has something to
+   review. Today's own record (a 다시 만들기) never counts. */
+async function lessonPrevFor(iso){
+  const all = await lessonList();
+  const older = all.filter((r) => asObj(r) && typeof r.date === "string" && r.date < iso)
+    .sort((a, b) => b.date.localeCompare(a.date));
+  for (const r of older) if (reviewItemsFrom(r).length) return r;
+  return null;
+}
 async function lessonLoad(date){
   const db = await openDb();
   try { return (await rq2p(lessonStore(db,"readonly").get(date))) || null; }
@@ -1551,7 +1753,8 @@ function rowHtml(r, i, p){
   } else {
     inner = "<div" + cls("say") + ">" + from + esc(r.ko || "") + badge + "</div>";
   }
-  return '<button class="' + p + "row " + r.kind + '" data-i="' + i + '" type="button">' + inner + "</button>";
+  return '<button class="' + p + "row " + r.kind + (r.quiz ? " quiz" : "") + '" data-i="' + i +
+    '" type="button">' + inner + "</button>";
 }
 
 function renderScript(lesson){
@@ -1569,7 +1772,21 @@ function renderScript(lesson){
   body.querySelectorAll(".L-row").forEach((b) => {
     b.onclick = () => { if (player) player.seek(lesson.rows[Number(b.getAttribute("data-i"))].start); };
   });
+  quizRows = [];
+  body.querySelectorAll(".L-row.quiz").forEach((b) => {
+    const r = lesson.rows[Number(b.getAttribute("data-i"))];
+    quizRows.push({ el: b, at: (r && Number(r.reveal)) || 0 });
+  });
   curRow = -1;
+}
+
+/* 0교시: covered until the answer plays, covered again on a seek back before it */
+let quizRows = [];
+function quizReveal(ms){
+  for (const q of quizRows){
+    const on = ms >= q.at;
+    if (q.el.classList.contains("shown") !== on) q.el.classList.toggle("shown", on);
+  }
 }
 
 function highlight(i){
@@ -1676,6 +1893,7 @@ function renderFoot(){
     openLesson(true).catch((e) => lessonNotice((e && e.message) || String(e)));
   };
   $("lMeta").textContent =
+    (l.counts.review ? "복습 " + l.counts.review + " · " : "") +
     "단어 " + l.counts.words + " · 숙어 " + l.counts.idioms + " · 문장 " + l.counts.sentences +
     (l.counts.frames ? " · 뼈대 " + l.counts.frames : "") +
     (current.blob ? " · " + sizeLabel(current.blob.size) : "") +
@@ -1694,6 +1912,7 @@ function resetTickCache(){ tickClock = null; tickPct = null; tickPlaying = null;
 function onTick(ms, playing){
   if (!current) return;
   highlight(rowAt(current.lesson.rows, ms));
+  quizReveal(ms);
   lessonPosNote(ms, playing);
 
   const clock = fmtClock(ms);
@@ -2544,7 +2763,11 @@ async function makeLessonRun(rows){
     const content = await lessonWriteScript(rows);
     if (lessonCancelled) throw new Error("__cancelled__");
 
-    const lesson = lessonBuild(content, new Date());
+    const now = new Date();
+    /* 0교시 is read out of the last saved lesson; a storage error only costs the review */
+    const prev = await lessonPrevFor(studyDate(now)).catch(() => null);
+    if (lessonCancelled) throw new Error("__cancelled__");
+    const lesson = lessonBuild(content, now, prev);
     let blob = null, fellBack = "";
 
     if (lset.engine === "cloud" && lset.ttsKey){
@@ -3048,6 +3271,7 @@ function exportHtml(lesson, b64){
       };
       if (r.en) o.en = r.en;
       if (Array.isArray(r.table)) o.table = r.table;
+      if (r.quiz){ o.quiz = true; o.reveal = ms1(r.reveal); }
       return o;
     }),
     segments: lesson.segments.map((s) => ({
@@ -3086,6 +3310,8 @@ function exportHtml(lesson, b64){
 '.row{display:block;width:100%;text-align:left;background:transparent;border:1px solid transparent;',
 'border-radius:12px;padding:9px 11px;margin-bottom:3px;cursor:pointer;font-family:inherit;color:inherit}',
 '.row.on{background:var(--surface-2);border-color:#3d4a5a}',
+'.row.quiz:not(.shown) .es{background:var(--surface-2);color:transparent;border-radius:5px;',
+'user-select:none;box-shadow:inset 0 0 0 1px var(--line)}',
 '.es{font-size:18px;font-weight:650;color:var(--es);line-height:1.4;word-break:break-word}',
 '.ko{font-size:13px;color:var(--muted);margin-top:3px;line-height:1.45;word-break:break-word}',
 '.say{font-size:14px;color:var(--ko);line-height:1.5;word-break:break-word}',
@@ -3110,7 +3336,8 @@ function exportHtml(lesson, b64){
 exportAskCss(),
 '</style></head><body>',
 '<header><h1>' + esc(lesson.dateLabel) + ' 스페인어 수업</h1>',
-'<div class="sub">단어 ' + lesson.counts.words + ' · 숙어 ' + lesson.counts.idioms +
+'<div class="sub">' + (lesson.counts.review ? '복습 ' + lesson.counts.review + ' · ' : '') +
+  '단어 ' + lesson.counts.words + ' · 숙어 ' + lesson.counts.idioms +
   ' · 문장 ' + lesson.counts.sentences +
   (lesson.counts.frames ? ' · 뼈대 ' + lesson.counts.frames : '') + ' · ' + fmtClock(lesson.totalMs) +
   (b64 ? '' : ' · 기기 음성') + '</div></header>',
@@ -3158,6 +3385,12 @@ scriptSafe(String(rowHtml)),
 '  html += rowHtml(r, i, "");',
 '}',
 'body.innerHTML = html;',
+'/* 0교시: the Spanish answer stays covered until it plays */',
+'var QZ = [];',
+'body.querySelectorAll(".row.quiz").forEach(function(n){',
+'  QZ.push({ el: n, at: Number(D.rows[Number(n.getAttribute("data-i"))].reveal) || 0 }); });',
+'var reveal = function(ms){ for (var q = 0; q < QZ.length; q++){ var on2 = ms >= QZ[q].at;',
+'  if (QZ[q].el.classList.contains("shown") !== on2) QZ[q].el.classList.toggle("shown", on2); } };',
 '',
 'var mark = function(i){',
 '  if (i === cur) return;',
@@ -3184,6 +3417,7 @@ scriptSafe(String(rowHtml)),
 'var lastC = null, lastP = null, lastOn = null;',
 'var tick = function(ms, on){',
 '  mark(rowAt(ms));',
+'  reveal(ms);',
 '  var c = clock(ms);',
 '  if (c !== lastC){ atEl.textContent = c; lastC = c; }',
 '  var pc = Math.round((D.totalMs ? Math.min(100, ms/D.totalMs*100) : 0) * 10) / 10;',
