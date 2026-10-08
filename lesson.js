@@ -432,10 +432,12 @@ function lessonBuild(content, when){
     });
   }
 
-  /* the English comparison: a badge on screen, one short Korean line aloud */
+  /* the English comparison: a badge on screen, one short Korean line aloud.
+     The ~ comes out of the spoken text only — the Korean voice reads it aloud
+     as «물결». The badge on screen is built from item.en and keeps it. */
   function enLine(sec, item){
     if (!item.en) return;
-    const say = item.enSay || item.en.replace(/~/g, "").trim();
+    const say = (item.enSay || item.en).replace(/\s*~\s*/g, " ").replace(/\s+/g, " ").trim();
     const gg = row(sec, "en", { en: item.en });
     seg(sec, gg, "ko", "영어로는 " + say + withKo(say) + " 비슷해요.", P.en);
   }
@@ -1155,6 +1157,48 @@ let player = null;
 const LESSON_LOOP_KEY = "interp.lessonLoop";
 let lessonLoop = jget(LESSON_LOOP_KEY, false) === true;
 
+/* Where each saved lesson was last left, so 📚 can pick up from there. Keyed by
+   date AND the record's createdAt: 다시 만들기 keeps the date but is a different
+   lesson, and must not inherit the old one's place. Only a handful are kept. */
+const LESSON_POS_KEY = "interp.lessonPos";
+const LESSON_POS_KEEP = 10;
+const LESSON_POS_END_MS = 1500;     // this close to the end counts as finished
+let lessonPosArmed = false;         // the current mount has actually been played
+let lessonPosSec = -1;              // last whole second written, to write ~1/s
+
+function lessonPosId(c){ return c ? String(c.date) + "|" + String(c.createdAt || "") : ""; }
+function lessonPosGet(c){
+  const all = jget(LESSON_POS_KEY, {});
+  const v = all && typeof all === "object" ? all[lessonPosId(c)] : null;
+  const ms = v && Number(v.ms);
+  return ms > 0 && ms < (c.lesson.totalMs || 0) - LESSON_POS_END_MS ? ms : 0;
+}
+function lessonPosPut(c, ms){
+  if (!c) return;
+  const prev = jget(LESSON_POS_KEY, {});
+  const all = Object.assign({}, prev && typeof prev === "object" ? prev : {});
+  const finished = !(ms > 0) || ms >= (c.lesson.totalMs || 0) - LESSON_POS_END_MS;
+  if (finished) delete all[lessonPosId(c)];
+  else all[lessonPosId(c)] = { ms: Math.round(ms), t: Date.now() };
+  const keep = Object.keys(all)
+    .sort((a, b) => (Number(all[b] && all[b].t) || 0) - (Number(all[a] && all[a].t) || 0))
+    .slice(0, LESSON_POS_KEEP);
+  const out = {};
+  for (const k of keep) out[k] = all[k];
+  jset(LESSON_POS_KEY, out);
+}
+/* from onTick: nothing is written until this mount has played at least once,
+   so merely opening a lesson (which paints position 0) cannot wipe its place */
+function lessonPosNote(ms, playing){
+  if (!current) return;
+  if (playing) lessonPosArmed = true;
+  if (!lessonPosArmed) return;
+  const sec = Math.floor(ms / 1000);
+  if (sec === lessonPosSec && playing) return;
+  lessonPosSec = sec;
+  lessonPosPut(current, ms);
+}
+
 function clearMediaSession(){
   if (!("mediaSession" in navigator)) return;
   try { navigator.mediaSession.metadata = null; } catch (e) {}
@@ -1187,7 +1231,18 @@ function audioPlayer(lesson, blob, onTick){
      MP3_DELAY_MS ahead of the script because of the codec's own delay. Seeks
      put it back, so a tapped row lands on that row — subtracting on the way in
      without adding it on the way out would light up the row above instead. */
-  const posMs = () => Math.max(0, a.currentTime * 1000 - MP3_DELAY_MS);
+  /* A seek made before the file's metadata has loaded (📚 resuming a lesson the
+     moment it mounts) is held here and applied on loadedmetadata: Chrome keeps
+     such an early currentTime, but Safari has been known to drop it, and a
+     dropped seek would start at 0 and then save 0 over the remembered place. */
+  let pendingSeek = null;
+  a.addEventListener("loadedmetadata", () => {
+    if (pendingSeek == null) return;
+    const t = pendingSeek;
+    pendingSeek = null;
+    try { if (Math.abs(a.currentTime - t) > 0.05) a.currentTime = t; } catch (e) {}
+  });
+  const posMs = () => Math.max(0, (pendingSeek != null ? pendingSeek : a.currentTime) * 1000 - MP3_DELAY_MS);
 
   /* destroy() pauses, and that "pause" event lands one task later — by then a
      new lesson may already be mounted, and this tick would paint the old
@@ -1229,7 +1284,9 @@ function audioPlayer(lesson, blob, onTick){
     toggle: function (){ a.paused ? this.play() : this.pause(); },
     /* ms is a timeline position, so the codec delay goes back on here */
     seek: (ms) => {
-      try { a.currentTime = (Math.max(0, ms) + MP3_DELAY_MS) / 1000; } catch (e) {}
+      const t = (Math.max(0, ms) + MP3_DELAY_MS) / 1000;
+      pendingSeek = a.readyState === 0 ? t : null;
+      try { a.currentTime = t; } catch (e) {}
       tick();
     },
     /* measured from the timeline position, so repeated nudges cannot drift */
@@ -1637,6 +1694,7 @@ function resetTickCache(){ tickClock = null; tickPct = null; tickPlaying = null;
 function onTick(ms, playing){
   if (!current) return;
   highlight(rowAt(current.lesson.rows, ms));
+  lessonPosNote(ms, playing);
 
   const clock = fmtClock(ms);
   if (clock !== tickClock){
@@ -1694,8 +1752,10 @@ function lessonNotice(text){
   box.style.display = text ? "block" : "none";
 }
 
-function mountLesson(rec, notice){
+function mountLesson(rec, notice, opts){
   stopPlayer();
+  lessonPosArmed = false;
+  lessonPosSec = -1;
   current = { lesson: rec.lesson, blob: rec.mp3 || null, engine: rec.engine, date: rec.date,
               /* the record's own identity, not just its date: 다시 만들기 keeps the
                  date and replaces the record, so a save aimed at the old record
@@ -1723,6 +1783,27 @@ function mountLesson(rec, notice){
     : devicePlayer(current.lesson, onTick);
   wireMediaSession();
   onTick(0, false);
+
+  /* 📚 and the past list pick up where this lesson was last left */
+  const resumeAt = opts && opts.resume ? lessonPosGet(current) : 0;
+  if (resumeAt > 0){
+    player.seek(resumeAt);
+    if (!notice) lessonNotice("지난번에 멈춘 곳(" + fmtClock(resumeAt) + ")부터 이어 듣습니다.");
+    const mine = current;
+    const top = document.createElement("button");
+    top.className = "mini";
+    top.id = "lFromTop";
+    top.type = "button";
+    top.textContent = "⏮ 처음부터 듣기";
+    top.onclick = () => {
+      if (current !== mine) return;
+      if (player) player.seek(0);
+      lessonPosPut(mine, 0);
+      lessonNotice("");
+      top.remove();
+    };
+    $("lFoot").insertBefore(top, $("lFoot").firstChild);
+  }
 
   /* A saved device-mode lesson reopened on a phone with no Spanish voice would
      otherwise just sound wrong with nothing said about it. Checked after the
@@ -2369,6 +2450,43 @@ async function openLesson(force){
   }
 }
 
+/* ---------------- the 📚 button ----------------
+
+   Opens what is already saved — never writes a script, never calls TTS. The
+   newest lesson goes straight to the player, at the place it was last left;
+   the 🗂 지난 수업 button on that screen reaches the other days. */
+
+let lessonShelfOpening = false;
+
+async function openSavedLesson(){
+  /* a lesson is being made: show that screen again, and leave the run alone */
+  if (lessonMaking){ openDlg($("lesson")); return; }
+  if (recording){ setStatus("말이 끝난 뒤에 눌러주십시오"); return; }
+  if (busy || lessonOpening || lessonShelfOpening){ setStatus("아직 하던 일이 끝나지 않았습니다"); return; }
+  lessonShelfOpening = true;
+  try {
+    openDlg($("lesson"));
+    $("lTitle").textContent = "저장된 수업";
+    $("lFoot").innerHTML = "";
+
+    let all = [], listErr = null;
+    try { all = await lessonList(); } catch (e) { listErr = e; }
+    if (lessonMaking) return;             // a run started meanwhile; its screen wins
+
+    if (listErr || !all.length){
+      stopPlayer();
+      askShow(false);
+      current = null;
+      if (listErr) lessonMessage("저장된 수업을 읽지 못했습니다.", (listErr && listErr.message) || String(listErr));
+      else lessonMessage("아직 만든 수업이 없습니다.", "🎧 로 오늘 수업을 만들어 주세요.");
+      return;
+    }
+    mountLesson(all[0], "", { resume: true });
+  } finally {
+    lessonShelfOpening = false;
+  }
+}
+
 /* Raised synchronously, before makeLessonRun reaches its first await, and
    lowered only when the whole run is over.
 
@@ -2544,7 +2662,7 @@ async function showPast(){
       b.onclick = () => {
         const mine = ++pastPick;
         lessonLoad(b.getAttribute("data-d"))
-          .then((rec) => { if (mine === pastPick && rec) mountLesson(rec); })
+          .then((rec) => { if (mine === pastPick && rec) mountLesson(rec, "", { resume: true }); })
           .catch((e) => {
             if (mine !== pastPick) return;      // a later tap already won
             lessonNotice("그 수업을 열지 못했습니다.\n" + ((e && e.message) || e));
@@ -3481,6 +3599,8 @@ async function lessonTestVoice(){
 (function wireLesson(){
   const open = $("openLesson");
   if (open) open.onclick = () => { openLesson().catch((e) => showError((e && e.message) || String(e))); };
+  const shelf = $("openShelf");
+  if (shelf) shelf.onclick = () => { openSavedLesson().catch((e) => showError((e && e.message) || String(e))); };
   const close = $("lClose");
   if (close) close.onclick = () => { stopPlayer(); closeDlg($("lesson")); };
 
