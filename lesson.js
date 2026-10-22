@@ -68,11 +68,15 @@ const P = {
 const SEC = {
   intro:  { id: "intro",  title: "시작" },
   yday:   { id: "yday",   title: "0교시 · 어제 복습" },     // the date is added per lesson
-  words: { id: "words",  title: "1교시 · 오늘의 단어" },
-  idioms: { id: "idioms", title: "2교시 · 연계 숙어" },
-  sents:  { id: "sents",  title: "3교시 · 문장 해부" },
-  frames: { id: "frames", title: "4교시 · 말의 뼈대" },
-  review: { id: "review", title: "5교시 · 마무리 복습" },
+  /* the ids stay what they were: 0교시 reads yesterday's rows by sectionId */
+  newwords: { id: "newwords", title: "1교시 · 오늘의 새 단어" },
+  words: { id: "words",  title: "2교시 · 대화 단어" },
+  idioms: { id: "idioms", title: "3교시 · 연계 숙어" },
+  sents:  { id: "sents",  title: "4교시 · 문장 해부" },
+  grammar: { id: "grammar", title: "5교시 · 문법 한 칸" },
+  pron:   { id: "pron",   title: "6교시 · lo·le·se 연습" },
+  frames: { id: "frames", title: "7교시 · 말의 뼈대" },
+  review: { id: "review", title: "마무리 복습" },
   outro:  { id: "outro",  title: "마무리" }
 };
 
@@ -98,12 +102,18 @@ function ordKo(n){
 
 const LESSON_PROMPT = [
   "You are writing the content of a spoken Spanish lesson for a Korean speaker living in",
-  "Mexico. Below is everything they interpreted today as JSON: es (Spanish), ko (Korean),",
-  "an optional tip, and the study chunks they already saw.",
+  "Mexico, a complete beginner. Below is one JSON object:",
+  "  today        — everything they interpreted today: es (Spanish), ko (Korean), an optional",
+  "                 tip, and the study chunks they already saw. It may be EMPTY.",
+  "  new_words    — today's new words for the beginner, chosen by the app (may be empty).",
+  "  grammar_step — today's grammar topic: title, core (what to teach), how (how to explain it).",
+  "  pronoun_hits — today's Spanish lines where the app spotted lo/la/le/se/me/te (may be empty).",
   "",
   "Return ONE JSON object and nothing else. No markdown, no code fence, no commentary.",
   "",
   "{",
+  '  "new_words": [{"es":"","ko":"","example":{"es":"","ko":""},',
+  '                 "times":[{"when":"지금","es":"","ko":""}],"en":"","en_say":""}],',
   '  "words":     [{"es":"","ko":"","note":"","en":"","en_say":""}],',
   '  "idioms":    [{"es":"","ko":"","from":"","note":"","en":"","en_say":""}],',
   '  "sentences": [{"es":"","ko":"","chunks":[{"es":"","ko":"","note":"","en":"","en_say":"",',
@@ -111,8 +121,50 @@ const LESSON_PROMPT = [
   '  "frames":    [{"type":"frame","es":"","ko":"","note":"","en":"","en_say":"",',
   '                 "today":{"es":"","ko":""},"swaps":[{"es":"","ko":""}],',
   '                 "forms":[{"who":"나","es":"","ko":""}]}],',
+  '  "grammar":   {"explain":[""],"rule":"","examples":[{"es":"","ko":""}],',
+  '                "table":[{"label":"","es":"","ko":""}],"en":"","en_say":"","quiz":[{"ko":"","es":""}]},',
+  '  "pronoun":   {"points":[{"es":"","ko":"","who":"","what":""}],"quiz":[{"ko":"","es":""}]},',
   '  "outro": ""',
   "}",
+  "",
+  "If today is empty, return words, idioms, sentences and frames as empty arrays and write",
+  "everything else as usual.",
+  "",
+  "new_words — exactly one item per entry of the input new_words, same order, es copied EXACTLY.",
+  "  ko: the plain Korean meaning, short (a verb as ~하다, a word ending in -se as 자기 ~하다",
+  "    only if that is how Koreans say it, e.g. bañarse 씻다, 목욕하다).",
+  "  example: ONE very easy sentence of at most 7 words using the word, about the kitchen or",
+  "    daily life when that is natural, in plain Mexican Spanish, with its Korean.",
+  "  times: ONLY when the word is a verb: the same verb with 나 — now / already done / going to:",
+  '    [{"when":"지금","es":"como","ko":"나는 먹어"},',
+  '     {"when":"이미","es":"comí","ko":"나는 먹었어"},',
+  '     {"when":"앞으로","es":"voy a comer","ko":"나는 먹을 거야"}]',
+  "    For a word ending in -se use me: me baño / me bañé / me voy a bañar. Otherwise leave it empty.",
+  "  Mexico first: when a word has a second meaning a beginner in Mexico will meet, put both in",
+  "    ko, short (camión 트럭, 버스 / cuarto 방, 4분의 1 / llave 열쇠, 수도꼭지 / despedir 배웅하다,",
+  "    해고하다 / almuerzo 늦은 아침 — 직장 점심은 la comida). caliente is for food and things only:",
+  "    a hot person says tengo calor. Food words (huevo, leche, chile, plátano, pepino) are used",
+  "    only in their food meaning — never build a double-meaning phrase with them.",
+  "",
+  "grammar — teach grammar_step, following its core and how, for a complete beginner.",
+  "  explain: 2 or 3 short Korean sentences a child could follow. Show, do not name.",
+  "  rule: the whole point in ONE short Korean line.",
+  "  examples: 4 to 6 short, correct Mexican Spanish sentences that show the point, using",
+  "    today's words and new_words where natural, each with its Korean.",
+  "  table: OPTIONAL, 2 to 6 rows, only when a small table helps (persons, now/already/going-to,",
+  "    endings). label is a short Korean tag: 나, 너, 그(당신), 우리, 그들 / 지금, 이미, 앞으로 / 그것을 …",
+  "  en / en_say: OPTIONAL, one short English phrase that works the same way (I gave it to him).",
+  "  quiz: exactly 2: a short Korean sentence and its Spanish answer, using today's point.",
+  "",
+  "pronoun — a two-minute drill on the little words lo, la, los, las, le, les, se, me, te.",
+  "  points: 1 to 3. Prefer real lines from pronoun_hits, copied EXACTLY (the whole line or the",
+  "    part that carries the little word). Skip a hit that is not really one of them — la or los",
+  "    in front of a noun means 'the' and is not one. If no real hit is left, write 1 or 2 plain",
+  "    everyday examples instead.",
+  "    who: to whom, in plain Korean (그에게, 나에게, 자기 자신에게), or empty.",
+  "    what: what, in plain Korean (그것을, 밥을), or empty.",
+  "  quiz: exactly 3: a short Korean request or sentence and its Spanish, each using one of",
+  "    these little words (그에게 그것을 줘 → Dáselo).",
   "",
   "words — 6 to 12 items: the Spanish worth memorising from today, most useful first.",
   "  es: the word or short chunk exactly as it appeared today. Never invent one.",
@@ -172,7 +224,7 @@ const LESSON_PROMPT = [
   '    For type "link" and for frames that do not change with the person (hay que, parece que),',
   "    leave forms empty.",
   "",
-  "en / en_say — on words, idioms, chunks and frames, OPTIONAL: the closest English, so a",
+  "en / en_say — on new_words, words, idioms, chunks, frames and grammar, OPTIONAL: the closest English, so a",
   "  Korean who knows a little English gets it at once (creo que -> I think, a lo mejor -> maybe,",
   "  entonces -> so, pero -> but, voy a -> I'm going to ~). en is the English, 1 to 4 words.",
   "  en_say is how a Korean would write that English in Hangul (아이 띵크, 메이비, 아임 고잉 투).",
@@ -181,7 +233,8 @@ const LESSON_PROMPT = [
   "",
   "GRAMMAR, CHILD-SIMPLE — applies to every Korean line you write:",
   "- Never use grammar terms: 과거분사, 현재분사, 접속법, 직설법, 재귀동사, 명령형, 부정사,",
-  "  동사원형, 시제, 활용, 인칭, 목적격, 대명사, 전치사, 관사, 과거형, 미래형.",
+  "  동사원형, 시제, 활용, 인칭, 목적격, 대명사, 전치사, 관사, 과거형, 미래형,",
+  "  목적어, 주어, 동사, 명사, 형용사, 점과거, 불완료과거, 현재완료, 가정법.",
   "  Say what it DOES instead: 이미 끝난 일을 말할 때 모양 / 앞으로 할 일 /",
   "  바라는 마음일 때 que 뒤에서 모양이 살짝 바뀜 / 자기 몸에 하는 일일 때 붙는 me·te·se.",
   "  If a term is truly unavoidable, put it once in brackets after the plain words.",
@@ -192,10 +245,12 @@ const LESSON_PROMPT = [
   "",
   "HARD RULES",
   "- Never introduce a Spanish word, name, number, price, time or place that is not in the data.",
-  "  The exceptions are idioms (only expressions you are certain of), and the swaps, forms and",
-  "  times of a frame or chunk — and those must be plain, correct, everyday Spanish built on",
-  "  today's words where possible. today is never an exception: it is always a real quote.",
-  "- Every Korean line is plain, short and meant to be heard out loud. No markdown, no brackets.",
+  "  The exceptions are idioms (only expressions you are certain of), the swaps, forms and",
+  "  times of a frame or chunk, and everything in new_words, grammar and pronoun — and those",
+  "  must be plain, correct, everyday Spanish built on today's words where possible.",
+  "  today is never an exception: it is always a real quote.",
+  "- Every Korean line is plain, short and meant to be heard out loud. No markdown, no brackets",
+  "  (the one exception: a bracketed term that grammar_step.how explicitly allows, once).",
   "- Skip greetings, yes/no, bare numbers and anything with no learning in it.",
   "- Merge duplicates. If the same phrase came up five times it appears once."
 ].join("\n");
@@ -308,39 +363,165 @@ function cleanFrames(list, sources){
   return out;
 }
 
+/* ---- grammar words a beginner should never hear ----
+   The prompt already forbids them; this is the check on what came back. A
+   term inside brackets is allowed once in the whole lesson (과거분사 at ⑦);
+   a second bracketed one is taken out, and a line that still uses one in the
+   open is dropped rather than read out. */
+const GRAMMAR_BAN = [
+  "과거분사", "현재분사", "분사", "접속법", "직설법", "재귀동사", "재귀", "명령형", "명령법",
+  "부정사", "동사원형", "시제", "인칭", "목적격", "목적어", "대명사", "전치사", "관사",
+  "과거형", "미래형", "점과거", "단순과거", "불완료", "반과거", "현재완료", "완료형",
+  "가정법", "조건법", "동명사", "형용사", "부사", "명사", "동사"
+];
+const BAN_RE = new RegExp(GRAMMAR_BAN.join("|"));
+function banScrub(s, state){
+  let t = cleanStr(s);
+  if (!t || !BAN_RE.test(t)) return t;
+  t = t.replace(/\s*\(([^()]*)\)/g, (all, inner) => {
+    if (!BAN_RE.test(inner)) return all;
+    if (state && !state.used){ state.used = true; return all; }
+    return "";
+  }).trim();
+  const open = t.replace(/\([^()]*\)/g, "");
+  return BAN_RE.test(open) ? "" : t;
+}
+
+/* A small table whose first column is a free short Korean label (나, 이미,
+   그것을 …), as the grammar part writes it. */
+function cleanLabelTable(list){
+  const out = [];
+  for (const c of (Array.isArray(list) ? list : [])){
+    const o = asObj(c), p = cleanPair(o);
+    const label = cleanStr(o && (o.label || o.who || o.when));
+    if (!p || !label || label.length > 12) continue;
+    out.push({ who: label, es: p.es, ko: p.ko });
+    if (out.length >= 6) break;
+  }
+  return out.length >= 2 ? out : [];
+}
+
+/* new_words: only the words the app asked for, in its order. A missing or
+   half-written one is simply not taught today — and so not counted as learned. */
+function cleanNewWords(list, want, ban){
+  const got = new Map();
+  for (const x of (Array.isArray(list) ? list : [])){
+    const o = asObj(x);
+    const es = cleanStr(o && o.es), ko = cleanStr(o && o.ko);
+    if (!es || !ko || got.has(foldEs(es))) continue;
+    got.set(foldEs(es), o);
+  }
+  const out = [];
+  for (const w of (Array.isArray(want) ? want : [])){
+    const o = got.get(foldEs(w));
+    if (!o) continue;
+    const ex = cleanPair(o.example);
+    out.push(Object.assign({
+      es: w, ko: cleanStr(o.ko), ex: ex,
+      times: cleanTable(o.times, "when", WHEN_MAP, WHEN_ORDER)
+    }, cleanEn(o)));
+  }
+  return out;
+}
+
+function cleanGrammar(raw, ban){
+  const o = asObj(raw);
+  if (!o) return null;
+  const explain = (Array.isArray(o.explain) ? o.explain : [o.explain])
+    .map((s) => banScrub(s, ban)).filter(Boolean).slice(0, 3);
+  const examples = cleanPairs(o.examples, 6);
+  const quiz = (Array.isArray(o.quiz) ? o.quiz : []).map(cleanPair).filter(Boolean).slice(0, 2);
+  const g = Object.assign({
+    explain: explain, rule: banScrub(o.rule, ban), examples: examples,
+    table: cleanLabelTable(o.table), quiz: quiz
+  }, cleanEn(o));
+  return g.explain.length || g.rule || g.examples.length || g.quiz.length ? g : null;
+}
+
+function cleanPronoun(raw, sources, ban){
+  const o = asObj(raw);
+  if (!o) return null;
+  const short = (v) => { const s = banScrub(v, ban); return s.length <= 14 ? s : ""; };
+  const points = (Array.isArray(o.points) ? o.points : []).map((x) => {
+    const p = cleanPair(x);
+    return p ? { es: p.es, ko: p.ko, who: short(x.who), what: short(x.what),
+                 today: !!sources && sources.length > 0 && isQuoted(p.es, sources) } : null;
+  }).filter(Boolean).slice(0, 3);
+  const quiz = (Array.isArray(o.quiz) ? o.quiz : []).map(cleanPair).filter(Boolean).slice(0, 3);
+  return points.length || quiz.length ? { points: points, quiz: quiz } : null;
+}
+
+/* The reply was cut off: keep everything up to the last value that closed,
+   and close what was still open. Only used once a retry has failed too. */
+function lessonSalvageJson(text){
+  const s0 = String(text || "");
+  const a = s0.indexOf("{");
+  if (a < 0) throw new Error("JSON 을 찾지 못했습니다.");
+  const s = s0.slice(a);
+  const stack = [];
+  let inStr = false, escp = false, cut = -1, cutStack = null;
+  for (let i = 0; i < s.length; i++){
+    const ch = s[i];
+    if (inStr){
+      if (escp) escp = false; else if (ch === "\\") escp = true; else if (ch === '"') inStr = false;
+      continue;
+    }
+    if (ch === '"') inStr = true;
+    else if (ch === "{" || ch === "[") stack.push(ch === "{" ? "}" : "]");
+    else if (ch === "}" || ch === "]"){
+      stack.pop();
+      if (!stack.length) return JSON.parse(s.slice(0, i + 1));
+      cut = i + 1; cutStack = stack.slice();
+    }
+  }
+  if (cut < 0) throw new Error("JSON 을 찾지 못했습니다.");
+  return JSON.parse(s.slice(0, cut) + cutStack.reverse().join(""));
+}
+
 /* Drop anything missing a side, so a half-written item can never become a
    silent segment or a blank line later on. Every new part is optional: a
    reply cut short loses that part, never the lesson.
    `sourceEs`, when given, is the Spanish actually said today; it is what a
-   frame's "today" example is checked against. */
-function lessonNormalise(raw, sourceEs){
+   frame's "today" example is checked against. An EMPTY array means nothing
+   was said today: then nothing may claim to come from today's talk.
+   `cur`, when given, is the day's curriculum plan (curriculumPlan). */
+function lessonNormalise(raw, sourceEs, cur){
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("대본 형식이 올바르지 않습니다.");
   const sources = Array.isArray(sourceEs) ? sourceEs.map(quoteKey) : null;
+  const silent = Array.isArray(sourceEs) && sourceEs.length === 0;
+  const ban = { used: false };
+  const note = (v) => banScrub(v, ban);
 
-  const words = (Array.isArray(raw.words) ? raw.words : [])
-    .map((w) => Object.assign({ es: cleanStr(w && w.es), ko: cleanStr(w && w.ko), note: cleanStr(w && w.note) },
+  const words = (silent ? [] : Array.isArray(raw.words) ? raw.words : [])
+    .map((w) => Object.assign({ es: cleanStr(w && w.es), ko: cleanStr(w && w.ko), note: note(w && w.note) },
                               cleanEn(w)))
     .filter((w) => w.es && w.ko)
     .slice(0, 14);
-  if (!words.length) throw new Error("대본에 단어가 없습니다.");
+
+  /* today's new words, minus any that turned up in today's own words */
+  const talked = new Set(words.map((w) => foldEs(w.es)));
+  const newWords = cleanNewWords(raw.new_words, cur && cur.newWords, ban)
+    .filter((w) => !talked.has(foldEs(w.es)));
+  const grammar = cur && cur.grammar ? cleanGrammar(raw.grammar, ban) : null;
+  if (!words.length && !newWords.length && !grammar) throw new Error("대본에 단어가 없습니다.");
 
   const known = words.map((w) => w.es);
-  const idioms = (Array.isArray(raw.idioms) ? raw.idioms : [])
+  const idioms = (silent ? [] : Array.isArray(raw.idioms) ? raw.idioms : [])
     .map((x) => Object.assign({
       es: cleanStr(x && x.es), ko: cleanStr(x && x.ko),
-      from: cleanStr(x && x.from), note: cleanStr(x && x.note)
+      from: cleanStr(x && x.from), note: note(x && x.note)
     }, cleanEn(x)))
     .filter((x) => x.es && x.ko)
     .slice(0, 5);
   for (const x of idioms) if (known.indexOf(x.from) < 0) x.from = "";
 
   let timesLeft = MAX_TIMES;
-  const sentences = (Array.isArray(raw.sentences) ? raw.sentences : [])
+  const sentences = (silent ? [] : Array.isArray(raw.sentences) ? raw.sentences : [])
     .map((s) => ({
       es: cleanStr(s && s.es), ko: cleanStr(s && s.ko),
       chunks: (Array.isArray(s && s.chunks) ? s.chunks : [])
         .map((c) => Object.assign({
-          es: cleanStr(c && c.es), ko: cleanStr(c && c.ko), note: cleanStr(c && c.note),
+          es: cleanStr(c && c.es), ko: cleanStr(c && c.ko), note: note(c && c.note),
           times: cleanTable(c && c.times, "when", WHEN_MAP, WHEN_ORDER)
         }, cleanEn(c)))
         .filter((c) => c.es && c.ko)
@@ -353,25 +534,44 @@ function lessonNormalise(raw, sourceEs){
     if (c.times.length && timesLeft > 0) timesLeft--; else c.times = [];
   }
 
+  const frames = silent ? [] : cleanFrames(raw.frames, sources);
+  for (const f of frames) f.note = note(f.note);
+
   return {
+    newWords: newWords,
     words: words,
     idioms: idioms,
     sentences: sentences,
-    frames: cleanFrames(raw.frames, sources),
-    outro: cleanStr(raw.outro) || "오늘 수업 끝. 내일 한 번 꼭 써먹어 보세요."
+    grammar: grammar,
+    pronoun: cleanPronoun(raw.pronoun, sources, ban),
+    frames: frames,
+    outro: banScrub(raw.outro, ban) || "오늘 수업 끝. 내일 한 번 꼭 써먹어 보세요."
   };
 }
 
-async function lessonWriteScript(rows){
+/* `cur` is the day's curriculum plan: which new words to explain, which
+   grammar step, and the lines where a lo/le/se was spotted. It travels in the
+   same single call as today's conversation. */
+async function lessonWriteScript(rows, cur){
   const payload = rows.map((e) => ({
     es: spanishOf(e),
     ko: koreanOf(e),
     tip: e.tip || undefined,
     chunks: (e.study || []).map((s) => s.es + " = " + s.ko)
   }));
-  const body = JSON.stringify(payload);
-  const cfg = { temperature: 0.4, thinking_level: "medium" };
+  const step = cur && cur.grammar ? GRAMMAR_STEPS[cur.grammar.idx] : null;
+  const body = JSON.stringify({
+    today: payload,
+    new_words: cur ? cur.newWords : [],
+    grammar_step: step ? { title: step.title, core: step.core, how: step.how } : null,
+    pronoun_hits: cur ? cur.pronounHits : []
+  });
+  /* the reply is long now (ten new words, a grammar part, a drill on top of
+     the old parts): the cap is set well above it, so a cut-off reply means
+     something went wrong rather than that the lesson simply grew */
+  const cfg = { temperature: 0.4, thinking_level: "medium", max_output_tokens: 32768 };
 
+  const replies = [];
   let lastErr = null;
   for (let attempt = 0; attempt < 2; attempt++){
     const nudge = attempt === 0 ? "" :
@@ -387,11 +587,19 @@ async function lessonWriteScript(rows){
           () => rej(new Error("대본 요청이 " + (SCRIPT_TIMEOUT_MS / 1000) + "초 안에 끝나지 않았습니다.")),
           SCRIPT_TIMEOUT_MS))
       ]);
-      return lessonNormalise(lessonExtractJson(reply), payload.map((p) => p.es));
+      replies.push(String(reply || ""));
+      return lessonNormalise(lessonExtractJson(reply), payload.map((p) => p.es), cur);
     } catch (e) {
       if (/API \d{3}/.test((e && e.message) || "")) throw e;   // key, quota, model: do not retry
       lastErr = e;
     }
+  }
+  /* both replies were cut off or malformed: keep what the longer one finished
+     — a part that was cut is simply missing, the rest of the lesson stands */
+  const longest = replies.sort((a, b) => b.length - a.length)[0];
+  if (longest){
+    try { return lessonNormalise(lessonSalvageJson(longest), payload.map((p) => p.es), cur); }
+    catch (e) {}
   }
   throw new Error("대본을 만들지 못했습니다.\n" + ((lastErr && lastErr.message) || ""));
 }
@@ -412,6 +620,390 @@ function withKo(word){
    spoken line says 뭐뭐 instead. */
 function sayKo(s){
   return String(s || "").replace(/\s*~\s*/g, " 뭐뭐 ").replace(/\s+/g, " ").trim();
+}
+
+/* ---------------- the course: new words, grammar, lo·le·se ----------------
+
+   Three parts that do not depend on what was said today, so a lesson can be
+   made on a day with no conversation at all. WHAT is taught and in which order
+   is code — the word list in words-es.js and GRAMMAR_STEPS below; Gemini only
+   writes meanings, examples and explanations, in the same single call.
+   Progress lives in localStorage, apart from the lesson records, and moves
+   only once a lesson has been saved (curriculumCommit): a failed or cancelled
+   run costs no words, and 다시 만들기 on the same day reuses the same ones. */
+
+const NEW_WORDS_KEY = "interp.newWords";   // { learned: { "<es>": { d: "<study day>", ko } } }
+const GRAMMAR_KEY = "interp.grammar";      // { n: steps taught, last: { date, k } }
+const NEW_PER_DAY = 10;
+const NEW_REVIEW_LAST = 4, NEW_REVIEW_WEEK = 2;
+
+function wordList(){
+  return typeof NEW_WORDS_ES !== "undefined" && Array.isArray(NEW_WORDS_ES) ? NEW_WORDS_ES : [];
+}
+/* accents and case aside — only ever used to compare, never stored */
+function foldEs(s){
+  return String(s || "").normalize("NFD").replace(/[̀-ͯ]/g, "").normalize("NFC").toLowerCase().trim();
+}
+function esTokens(lines){
+  const out = new Set();
+  for (const l of (Array.isArray(lines) ? lines : [])){
+    for (const t of foldEs(l).split(/[^a-z]+/)) if (t) out.add(t);
+  }
+  return out;
+}
+const dayNum = (iso) => Math.round(Date.UTC(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1,
+                                            Number(iso.slice(8, 10))) / 86400000);
+function isoAddDays(iso, n){
+  return new Date((dayNum(iso) + n) * 86400000).toISOString().slice(0, 10);
+}
+function isoLabel(iso){ return Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) + "일"; }
+
+function newWordsLearned(){
+  const s = asObj(jget(NEW_WORDS_KEY, null));
+  const src = asObj(s && s.learned) || {};
+  const out = {};
+  for (const k of Object.keys(src)){
+    const e = asObj(src[k]);
+    if (e && typeof e.d === "string" && /^\d{4}-\d{2}-\d{2}$/.test(e.d)) out[k] = { d: e.d, ko: cleanStr(e.ko) };
+  }
+  return out;
+}
+function newWordsCount(){
+  const learned = newWordsLearned();
+  return wordList().filter((w) => learned[w]).length;
+}
+
+/* The ten words for study day `iso`. Words already given to this day come
+   first (a 다시 만들기), then the next unlearned ones that were not in today's
+   own conversation. When the whole list is done, the longest-ago ones come
+   back — never one from the last week. */
+function newWordsPick(iso, sourceEs){
+  const list = wordList(), learned = newWordsLearned();
+  const toks = esTokens(sourceEs);
+  const inTalk = (w) => toks.has(foldEs(w)) || (/se$/.test(w) && toks.has(foldEs(w.slice(0, -2))));
+  const out = [], seen = new Set();
+  const take = (w) => { out.push(w); seen.add(w); };
+  for (const w of list) if (out.length < NEW_PER_DAY && learned[w] && learned[w].d === iso) take(w);
+  for (const w of list){
+    if (out.length >= NEW_PER_DAY) break;
+    if (!seen.has(w) && !learned[w] && !inTalk(w)) take(w);
+  }
+  const oldOnes = [];
+  if (out.length < NEW_PER_DAY){
+    const cut = isoAddDays(iso, -7);
+    const old = list.filter((w) => !seen.has(w) && learned[w] && learned[w].d < cut && !inTalk(w))
+      .sort((a, b) => learned[a].d.localeCompare(learned[b].d));
+    for (const w of old){
+      if (out.length >= NEW_PER_DAY) break;
+      take(w); oldOnes.push(w);
+    }
+  }
+  const before = list.filter((w) => learned[w] && learned[w].d !== iso).length;
+  return { words: out, again: oldOnes.length > 0, oldWords: oldOnes, learnedBefore: before };
+}
+
+/* For 0교시: some of the last day's new words, and one or two from about a
+   week ago — a small spaced repeat. The pick turns with the day so the same
+   four are not asked every time. */
+function newWordsReview(iso){
+  const learned = newWordsLearned(), byDay = new Map();
+  for (const w of wordList()){
+    const e = learned[w];
+    if (!e || !e.ko || !(e.d < iso)) continue;
+    if (!byDay.has(e.d)) byDay.set(e.d, []);
+    byDay.get(e.d).push({ es: w, ko: e.ko, d: e.d });
+  }
+  const days = Array.from(byDay.keys()).sort();
+  if (!days.length) return [];
+  const n = dayNum(iso);
+  const turn = (arr, k) => {
+    if (arr.length <= k) return arr.slice();
+    const s = n % arr.length;
+    return arr.slice(s).concat(arr.slice(0, s)).slice(0, k);
+  };
+  const last = days[days.length - 1];
+  const out = turn(byDay.get(last), NEW_REVIEW_LAST).map((x) => Object.assign(x, { when: "last" }));
+  let best = null, gap = 99;
+  for (const d of days){
+    const age = n - dayNum(d);
+    if (d === last || age < 5 || age > 14) continue;
+    if (Math.abs(age - 7) < gap){ best = d; gap = Math.abs(age - 7); }
+  }
+  if (best) for (const x of turn(byDay.get(best), NEW_REVIEW_WEEK)) out.push(Object.assign(x, { when: "week" }));
+  return out;
+}
+
+/* ---- the grammar course: one step a day, in this order ----
+   core goes to Gemini as what to teach, how as the way to say it, and rule/ex
+   are the code's own fallback and the «지난 문법 다시 보기» lines. None of the
+   Korean here may use a grammar term (GRAMMAR_BAN); step 7 alone allows
+   (과거분사) once, in brackets. */
+const GRAMMAR_STEPS = [
+  { title: "lo · la · los · las — 그것을, 그를",
+    core: "lo/la/los/las stand for the thing or person the action lands on (it, him, her, them), so the noun is not repeated. They go right BEFORE the verb (lo pongo), or glued to the END of a command or of the dictionary form (ponlo, voy a ponerlo). lo/los for words like el arroz, la/las for words like la salsa.",
+    how: "‘무엇을’에 해당하는 말을 짧게 바꿔 부르는 말이라고 설명. el arroz 를 다시 말하지 않고 lo 로 바꾸는 모습을 보여 줄 것. o 로 끝나는 말은 대개 lo, a 로 끝나는 말은 대개 la, 여럿이면 los·las.",
+    rule: "‘그것을, 그를’은 lo·la, 여럿이면 los·las. pongo, hago 같은 ‘하는 말’ 바로 앞에 와요.",
+    ex: [{ es: "¿El arroz? Lo pongo en el refri.", ko: "밥? 그거 냉장고에 넣을게." },
+         { es: "La salsa la hago yo.", ko: "소스는 내가 만들어." }] },
+  { title: "le · les — 그에게",
+    core: "le = to him / to her / to you (usted); les = to them / to you all. It marks the person who RECEIVES (give, tell, ask, serve, explain to someone). Before the verb (le doy), glued to the end of commands (dale). Very common: le digo, le doy, le pregunto, les sirvo. Even when the person is named, le stays — that is how Mexicans say it: le doy el plato al cliente.",
+    how: "‘누구에게’ 주거나 말하는지를 가리키는 말. 받는 사람이 하나면 le, 여럿이면 les. lo(무엇을)와 헷갈리지 않게 ‘무엇을 vs 누구에게’ 로 나란히 보여 줄 것.",
+    rule: "‘그 사람에게’는 le, 여러 사람에게는 les.",
+    ex: [{ es: "Le doy el plato.", ko: "그에게 접시를 줘요." },
+         { es: "Les explico la receta.", ko: "그 사람들에게 요리법을 설명해요." }] },
+  { title: "se 의 세 얼굴",
+    core: "Three uses of se. (1) le/les turns into se right before lo/la/los/las: nobody says 'le lo doy', it is 'se lo doy' (I give it to him/her); les + lo turns into se lo too. In Mexico you will often hear 'se los dije' for 'I told it to you all' — mention it as something to recognise, not as the rule. (2) se for doing something to oneself: se lava las manos (he washes his own hands) — with me/te for I/you: me lavo, te lavas. (3) se for 'people in general / it is done': aquí se vende pan, ¿cómo se dice esto?",
+    how: "세 가지를 하나씩 짧게. ① le 와 lo 가 나란히 오면 le 가 se 로 바뀐다 — se lo doy = 그에게 그것을 줘. ② 자기 몸에 하는 일 — se lava las manos. ③ 사람들이 보통 그렇게 한다 — aquí se vende pan 여기서 빵을 팔아요. 각각 예문을 붙일 것.",
+    rule: "le 와 lo 가 만나면 se lo. 자기 몸에 하는 일은 나 me, 너 te, 그·당신 se: me lavo, se lava. ‘사람들이 보통 ~해’에도 se.",
+    ex: [{ es: "Se lo doy mañana.", ko: "그에게 그거 내일 줄게요." },
+         { es: "¿Cómo se dice esto en español?", ko: "이거 스페인어로 어떻게 말해요?" }] },
+  { title: "me · te · nos — 나를, 나에게",
+    core: "me = me / to me, te = you / to you (tú), nos = us / to us. The same little word covers both 'me' and 'to me'. Same place as lo and le: before the verb (me ayudas), glued to the end of commands (ayúdame, dime).",
+    how: "나·너·우리 쪽 작은 말. ‘나를’과 ‘나에게’가 같은 me 하나라는 것을 예문 두 개로 보여 줄 것. 부탁할 때 끝에 붙는 모습(ayúdame)도.",
+    rule: "나를·나에게는 me, 너를·너에게는 te, 우리를·우리에게는 nos.",
+    ex: [{ es: "¿Me ayudas?", ko: "나 좀 도와줄래?" },
+         { es: "Te llamo en la tarde.", ko: "오후에 너한테 전화할게." }] },
+  { title: "이미 끝난 일 ① 늘 같은 끝 모양",
+    core: "Finished past of regular verbs. -ar: -é, -aste, -ó, -amos, -aron (limpié, limpiaste, limpió, limpiamos, limpiaron). -er/-ir: -í, -iste, -ió, -imos, -ieron (comí, comiste, comió, comimos, comieron). The written accent matters: hablo (I speak) vs habló (he spoke). Signal words: ayer, anoche, la semana pasada. Give a 나/너/그(당신)/우리/그들·너희 table (in Mexico the -aron form is also 'you all').",
+    how: "어제·지난주처럼 이미 끝난 일을 말할 때 끝이 바뀐다. -ar 로 끝나는 말과 -er·-ir 로 끝나는 말 두 무리로 나눠 표로. hablo 와 habló 처럼 글자 위 작은 빗금(´) 하나로 뜻이 바뀌는 것도 짚을 것.",
+    rule: "이미 끝난 일은 -ar 말이면 -é, -aste, -ó, -er·-ir 말이면 -í, -iste, -ió 로 끝나요.",
+    ex: [{ es: "Ayer limpié la cocina.", ko: "어제 나는 주방을 청소했어." },
+         { es: "¿Ya comiste?", ko: "너 밥 먹었어?" }] },
+  { title: "이미 끝난 일 ② 통째로 외우는 말",
+    core: "Common irregular finished-past forms to learn as whole words: fui (I went / I was — ir and ser share it), hice / hizo (did, made), tuve (had), puse (put), dije (said), traje (brought), vine (came), pude (could), estuve (was, somewhere), di (gave), vi (saw). These have no written accent.",
+    how: "자주 쓰는 말은 모양이 제멋대로라 통째로 외운다. fui 하나가 ‘갔어’도 되고 ‘~였어’도 된다는 것. 주방에서 자주 쓰는 hice, puse, traje 를 예문으로.",
+    rule: "자주 쓰는 말은 모양이 제멋대로라 통째로 외워요: fui, hice, tuve, puse, dije.",
+    ex: [{ es: "Ya hice la salsa.", ko: "소스 벌써 만들었어." },
+         { es: "Fui al mercado temprano.", ko: "일찍 시장에 갔어." }] },
+  { title: "‘~해 본 적 있어’ — he + -ado · -ido",
+    core: "he, has, ha, hemos, han + a form ending in -ado (-ar verbs) or -ido (-er/-ir verbs): he comido, ¿has probado...?, nunca he ido. Teach it for EXPERIENCE (have you ever...). In Mexico a plain finished action is usually said with the finished past (ya comí); he + -ado is most natural for experience: ¿Has probado el mole? Nunca he visto la nieve. Irregular ones: hecho, puesto, dicho, visto, abierto, escrito, roto, vuelto.",
+    how: "‘~해 본 적 있어’에 쓴다. he·has·ha 뒤에 끝이 -ado, -ido 로 바뀐 말이 붙는다. 방금 한 일은 멕시코에서는 ya comí 처럼 말한다는 것을 꼭 짚을 것. 이 -ado·-ido 모양을 책에서 부르는 이름은 괄호로 딱 한 번만 (과거분사) 라고 적어도 된다. 멕시코에서는 그냥 끝난 일에는 ya comí 를 더 많이 쓴다는 것도.",
+    rule: "he, has, ha 뒤에 -ado·-ido 를 붙이면 ‘~해 본 적 있어’가 돼요. 방금 한 일은 ya comí 처럼 말해요.",
+    ex: [{ es: "¿Has probado el mole?", ko: "몰레 먹어 봤어?" },
+         { es: "Nunca he visto la nieve.", ko: "나는 눈을 본 적이 없어." }] },
+  { title: "-ado · -ido 로 ‘~된 상태’ 말하기",
+    core: "The same -ado/-ido word used as a describing word with estar: la puerta está cerrada, el pollo está cocido, la tienda está abierta, estoy cansado. Its ending matches the thing: cerrado / cerrada / cerrados / cerradas.",
+    how: "‘문이 닫혀 있어’처럼 이미 그렇게 된 상태. está 다음에 -ado·-ido. 물건이 a 로 끝나는 말이면 -ada, 여럿이면 -s 가 붙는 것을 짝지어 보여 줄 것.",
+    rule: "está + -ado·-ido 는 ‘~된 상태야’. la 쪽 말이면 -ada, 여럿이면 -s 를 붙여요.",
+    ex: [{ es: "La puerta está cerrada.", ko: "문이 닫혀 있어." },
+         { es: "El pollo ya está cocido.", ko: "닭고기는 벌써 익었어." }] },
+  { title: "예전에 늘 하던 일 — -aba · -ía",
+    core: "Used-to / background past. -ar: -aba, -abas, -aba, -ábamos, -aban (trabajaba). -er/-ir: -ía, -ías, -ía, -íamos, -ían (comía, vivía). Used for what happened regularly back then (antes trabajaba en un hotel), for the background of a story (llovía, era tarde), and for age and clock time in the past (tenía diez años, eran las tres). Only three are irregular: ir → iba, ser → era, ver → veía.",
+    how: "‘예전에는 늘 ~했었어’, ‘그때 ~하고 있었어’. 사진이 아니라 계속 돌아가던 영상 같은 것. antes, siempre, cuando era niño 같은 말과 함께. iba, era 는 따로 외운다.",
+    rule: "예전에 늘 하던 일이나 그때의 배경은 -aba, -ía 로 끝나요. iba, era 는 따로 외워요.",
+    ex: [{ es: "Antes trabajaba en un hotel.", ko: "예전에 나는 호텔에서 일했었어." },
+         { es: "Cuando era niño, comía mucho.", ko: "어렸을 때 나는 많이 먹었어." }] },
+  { title: "끝난 일 vs 예전에 하던 일 — 고르기",
+    core: "Finished past (-é, -ó, fui, hice) = one event that is over, with a clear end, like a photo (also with a counted number of times or a closed length of time: fui tres veces, trabajé ahí dos años): ayer comí tacos, llegó a las tres. -aba/-ía = what was going on in the background or happened again and again, like a video playing: comía cuando llegó; antes comía tacos cada día. Classic pair in one sentence: Cocinaba cuando llegó el jefe (I was cooking — background; the boss arrived — one event).",
+    how: "사진(끝이 분명한 일 — 세 번 했든 두 해 동안 했든 끝났으면 사진) vs 영상(그때 계속되던 일, 늘 하던 일) 비유로. 한 문장 안에 둘이 같이 나오는 예(Cocinaba cuando llegó el jefe)를 꼭 넣을 것. ayer·una vez 는 끝난 일 쪽, siempre·antes·cada día 는 하던 일 쪽 신호.",
+    rule: "끝이 분명한 일은 몇 번이든 얼마 동안이든 -é·-ó, 그때의 배경이나 늘 하던 일은 -aba·-ía.",
+    ex: [{ es: "Cocinaba cuando llegó el jefe.", ko: "요리하고 있었는데 사장님이 왔어." },
+         { es: "Antes iba al mercado, pero ayer fui a la tienda.", ko: "예전엔 시장에 다녔는데, 어제는 가게에 갔어." }] },
+  { title: "‘~해!’ 시키기와 작은 말 붙이기",
+    core: "Asking a friend (tú) to do something: the same form as 'he/she does': habla, come, limpia, lava. Short ones to learn: pon, haz, di, ven, sal, ten, ve. The little words glue to the END: ponlo, lávalo, dámelo, pásamela; once glued a written accent often appears to keep the stress (dame → dámelo). For usted it is ponga, haga, dígame (mention lightly).",
+    how: "친구에게 ‘~해!’ 할 때 모양. lo·me·se 같은 작은 말은 끝에 꼭 붙인다: ponlo(그거 놔), dámelo(그거 나한테 줘). 붙이고 나면 글자 위에 작은 빗금(´)이 생기는 것도 한 줄로.",
+    rule: "시킬 때는 lo·me·se 같은 작은 말을 끝에 붙여요: ponlo, dámelo.",
+    ex: [{ es: "Pásame la sal, por favor.", ko: "소금 좀 건네줘." },
+         { es: "Lávalo bien.", ko: "그거 잘 씻어." }] },
+  { title: "‘~하지 마’",
+    core: "Telling a friend NOT to do something changes the ending: no + (-ar verb → -es, -er/-ir verb → -as): no hables, no toques, no comas, no abras. Learn: no hagas, no pongas, no digas, no vayas, no salgas. The little words go back IN FRONT of the verb, not glued: tócalo → no lo toques, dámelo → no me lo des.",
+    how: "‘하지 마’ 는 no 다음에 끝이 바뀐다: -ar 말은 -es, -er·-ir 말은 -as. 시킬 때 끝에 붙던 lo 가 다시 앞으로 온다는 것을 tócalo / no lo toques 짝으로.",
+    rule: "‘하지 마’는 no 다음에 끝을 바꿔요(-ar 말은 -es, -er·-ir 말은 -as). 작은 말은 다시 앞으로: no lo toques.",
+    ex: [{ es: "No lo toques, está caliente.", ko: "그거 만지지 마, 뜨거워." },
+         { es: "No hagas ruido.", ko: "시끄럽게 하지 마." }] },
+  { title: "gustar 처럼 거꾸로 말하는 말",
+    core: "me gusta el café = coffee pleases me. The thing liked decides gusta / gustan: me gusta el taco, me gustan los tacos. me/te/le/nos/les in front shows WHO likes it. The same pattern: encantar (me encanta), doler (me duele la cabeza), faltar (nos falta sal), importar, molestar, quedar (te queda bien).",
+    how: "한국어 ‘나는 ~가 좋아’와 비슷하게 좋아하는 대상이 주인공. 대상이 여럿이면 gustan. me duele, me falta 같은 같은 꼴의 말을 주방 예문으로.",
+    rule: "‘나는 ~가 좋아’는 me gusta. 좋아하는 게 여럿이면 gustan.",
+    ex: [{ es: "Me gusta la comida coreana.", ko: "나는 한국 음식이 좋아." },
+         { es: "Me duelen los pies.", ko: "나 발이 아파." }] },
+  { title: "ser 와 estar — 둘 다 ‘이다’",
+    core: "ser = what something IS: who or what, where from, job, what it is made of, the time (soy coreano, es mi jefe, es de pollo, son las tres). estar = how or where something is right now: state, feeling, place (estoy cansado, la sopa está caliente, el jefe está en la oficina). Same word, different meaning: es aburrido (a boring person) vs está aburrido (bored right now).",
+    how: "원래 그런 것은 ser, 지금 그런 상태나 있는 곳은 estar. 같은 말이 ser/estar 에 따라 뜻이 바뀌는 짝(es aburrido / está aburrido)을 꼭 보여 줄 것.",
+    rule: "원래 그런 것은 ser, 지금 그런 상태나 있는 곳은 estar.",
+    ex: [{ es: "Soy de Corea y estoy en México.", ko: "나는 한국 사람이고 지금 멕시코에 있어." },
+         { es: "La sopa es de pollo y está muy caliente.", ko: "수프는 닭고기 수프인데 아주 뜨거워." }] },
+  { title: "por 와 para",
+    core: "para = the goal, who it is for, where it is headed, a deadline: para ti, para la mesa dos, para mañana, para limpiar. por = the reason, a thank-you, passing through, the price, the way: gracias por..., por teléfono, lo compré por cien pesos, paso por la tienda.",
+    how: "para 는 화살표 끝(목적·받을 사람·마감), por 는 이유와 지나가는 길·값·수단. 자주 쓰는 굳은 말(por favor, gracias por, para mañana)부터.",
+    rule: "목적·받을 사람·마감은 para, 이유·지나는 길·값·수단은 por.",
+    ex: [{ es: "Este plato es para la mesa dos.", ko: "이 접시는 2번 테이블 거야." },
+         { es: "Gracias por la ayuda.", ko: "도와줘서 고마워." }] },
+  { title: "el 쪽 말 · la 쪽 말, 하나 · 여럿 맞추기",
+    core: "Every noun is either an el word or a la word: most -o words take el/un, most -a words take la/una (exceptions to learn: el día, el problema, la mano). Describing words match it: el plato limpio, la mesa limpia, los platos limpios, las mesas limpias. Plural: add -s after a vowel, -es after a consonant (pan → panes, limón → limones).",
+    how: "o 로 끝나면 대개 el, a 로 끝나면 대개 la. 꾸미는 말도 끝을 맞추고 여럿이면 -s. el día, la mano 같은 예외 두세 개만.",
+    rule: "o 로 끝나면 대개 el, a 로 끝나면 대개 la. 꾸미는 말도 끝을 맞추고, 여럿이면 -s.",
+    ex: [{ es: "Los platos están limpios.", ko: "접시들이 깨끗해." },
+         { es: "La mesa está sucia.", ko: "테이블이 더러워." }] },
+  { title: "hay 와 está — ‘있다’ 두 가지",
+    core: "hay = there is / there are, for whether something exists at all (any number, never changes): hay pan, hay tres ollas, no hay gas. está / están = where a known, specific thing is: el pan está en la mesa, las ollas están abajo. In the past: había. hay que + verb = one has to.",
+    how: "‘~ 있어?’처럼 있는지 없는지는 hay, 이미 아는 그것이 어디 있는지는 está. 같은 물건으로 두 문장을 짝지어 보여 줄 것.",
+    rule: "있는지 없는지는 hay, 이미 아는 그것이 어디 있는지는 está.",
+    ex: [{ es: "¿Hay leche?", ko: "우유 있어?" },
+         { es: "La leche está en el refri.", ko: "우유는 냉장고에 있어." }] },
+  { title: "묻는 말 — qué · dónde · cuándo · cómo · cuánto",
+    core: "Question words carry a written accent: qué (what), quién (who), dónde (where), cuándo (when), cómo (how), cuánto / cuántos (how much / how many: ¿cuánto cuesta?, ¿cuántos platos?), cuál (which), por qué (why) — and the answer 'because' is porque, one word, no accent. In Mexico ¿mande? asks politely for something to be repeated.",
+    how: "묻는 말은 글자 위에 작은 빗금이 붙는다. ‘왜’는 por qué 두 단어, 대답 ‘왜냐하면’은 porque 한 단어. 주방에서 자주 묻는 말로 예문. ¿mande? 도 한 줄.",
+    rule: "묻는 말은 글자 위에 작은 빗금이 붙어요. ‘왜’는 por qué, 대답 ‘왜냐하면’은 porque.",
+    ex: [{ es: "¿Dónde está el cuchillo?", ko: "칼 어디 있어?" },
+         { es: "¿Cuánto cuesta?", ko: "얼마예요?" }] },
+  { title: "해야 해 — tengo que · hay que · debes",
+    core: "tener que + dictionary form = I/you have to (personal, the most common): tengo que, tienes que, tiene que, tenemos que. hay que + dictionary form = it has to be done, no one in particular. deber + dictionary form = should (advice, duty): debes descansar.",
+    how: "내가 해야 하면 tengo que, 누구든 해야 하면 hay que, ‘~해야지’는 debes. 나·너·그·우리 표는 tener que 로.",
+    rule: "내가 해야 하면 tengo que, 누구든 해야 하면 hay que, ‘~해야지’는 debes.",
+    ex: [{ es: "Tengo que lavar los platos.", ko: "나 설거지해야 해." },
+         { es: "Hay que cerrar la puerta.", ko: "문을 닫아야 해." }] },
+  { title: "앞으로 할 일 — voy a ~ 와 -é",
+    core: "The everyday future in Mexico: ir a + the dictionary form (voy a cocinar, vas a ver). The one-word future adds -é, -ás, -á, -emos, -án to the whole dictionary form (cocinaré, comerás); it sounds firmer, and is also used to guess (¿Dónde estará?). Irregular: haré, tendré, pondré, diré, saldré, vendré, podré.",
+    how: "앞으로 할 일은 voy a + 사전에 나오는 모양이 가장 흔하다. 한 단어로 끝에 -é 를 붙이는 방법도 있지만 더 딱딱하고 짐작할 때도 쓴다. 두 방법을 나란히.",
+    rule: "앞으로 할 일은 voy a + 사전에 나오는 모양이 가장 흔해요. 한 단어로는 끝에 -é, -ás, -á.",
+    ex: [{ es: "Mañana voy a llegar temprano.", ko: "내일 일찍 올게." },
+         { es: "Te llamaré en la noche.", ko: "밤에 너한테 전화할게." }] },
+  { title: "지금 하는 중 — estoy + -ando · -iendo",
+    core: "estar + a form ending in -ando (-ar verbs) or -iendo (-er/-ir verbs): estoy cocinando, está lavando, estamos comiendo; leyendo, durmiendo. Only for what is happening right now. The little words may go in front or be glued at the end: lo estoy lavando = estoy lavándolo.",
+    how: "‘지금 ~하고 있는 중’. estoy 다음에 -ando, -iendo. 주방에서 지금 하는 일로 예문. 작은 말은 앞에 와도 되고 끝에 붙어도 된다.",
+    rule: "지금 하고 있는 중이면 estoy + -ando·-iendo.",
+    ex: [{ es: "Estoy picando la cebolla.", ko: "나 지금 양파 썰고 있어." },
+         { es: "¿Qué estás haciendo?", ko: "너 지금 뭐 하고 있어?" }] },
+  { title: "‘~하면’ — si …",
+    core: "si + the ordinary present, then the present, a future or a request: si llueve, no voy; si tienes tiempo, ayúdame; si llega el jefe, avísame. Only real, possible situations here (no 'if I were'). Never the one-word future after si: si llega, not si llegará.",
+    how: "‘~하면’은 si 다음에 지금 모양을 그대로. 뒤에는 부탁이나 할 일을 붙인다. 주방에서 바로 쓸 예문.",
+    rule: "‘~하면’은 si 다음에 지금 모양을 그대로 써요.",
+    ex: [{ es: "Si tienes hambre, come algo.", ko: "배고프면 뭐 좀 먹어." },
+         { es: "Si llega el cliente, me avisas.", ko: "손님 오면 나한테 알려 줘." }] },
+  { title: "비교하기 — más … que · tan … como",
+    core: "más + describing word + que = more ... than; menos ... que = less ... than; tan ... como = as ... as. Special ones: mejor (better), peor (worse), mayor (older), menor (younger). el más grande = the biggest. Before a number it is más de: más de diez.",
+    how: "더 ~하면 más … que, 덜 ~하면 menos … que, 똑같이 ~하면 tan … como. mejor, peor 는 따로. 주방 물건 비교로.",
+    rule: "더 ~하면 más … que, 덜 ~하면 menos … que, 똑같이 ~하면 tan … como.",
+    ex: [{ es: "Este cuchillo es más grande que ese.", ko: "이 칼이 그것보다 더 커." },
+         { es: "La sopa está tan caliente como el café.", ko: "수프가 커피만큼 뜨거워." }] },
+  { title: "어쩌다 그렇게 됐어 — se me cayó",
+    core: "Things that happened without meaning to: se + me/te/le + the event: se me cayó el vaso (the glass fell 'on me' = I dropped it by accident), se me olvidó, se me rompió, se nos acabó el gas, se le quemó el arroz. The thing decides the ending: se me cayeron los platos.",
+    how: "‘내가 일부러 한 게 아니라 그렇게 돼 버렸어’라는 느낌. se + me(나한테) + 일어난 일. 떨어뜨리기·깜빡하기·태우기 같은 주방 실수로. se 의 세 얼굴과 이어 줄 것.",
+    rule: "일부러 한 게 아니면 se me + 일어난 일: se me cayó, se me olvidó.",
+    ex: [{ es: "Se me cayó el vaso.", ko: "실수로 컵을 떨어뜨렸어." },
+         { es: "Se me olvidó la llave.", ko: "열쇠를 깜빡했어." }] },
+  { title: "바라는 마음 — quiero que + 살짝 바뀐 끝",
+    core: "When someone wants, asks or hopes that ANOTHER person does something, the verb after que changes its ending: -ar verbs take -e (quiero que limpies), -er/-ir verbs take -a (quiero que comas). Same with necesito que, espero que, ojalá que, para que. These are the same endings seen in 'no hables, no comas', and the same short ones: hagas, pongas, vayas, tengas (no lo hagas → quiero que lo hagas). When the SAME person wants to do it, no que and no change: quiero comer, never quiero que como.",
+    how: "‘네가 ~해 줬으면 좋겠어’처럼 다른 사람에게 바랄 때 que 뒤 끝이 살짝 바뀐다. ‘하지 마’에서 본 그 끝과 같다는 것을 이어 줄 것. 문법 이름은 쓰지 말 것.",
+    rule: "다른 사람이 ~하길 바랄 땐 que 뒤 끝이 바뀌어요: -ar 말은 -e, -er·-ir 말은 -a.",
+    ex: [{ es: "Quiero que me ayudes.", ko: "네가 나를 도와줬으면 좋겠어." },
+         { es: "Necesito que llegues temprano.", ko: "네가 일찍 와 줘야 해." }] }
+];
+
+/* ①..⑳ then ㉑..㉟ — the course is shorter than that */
+function circNum(n){
+  if (n >= 1 && n <= 20) return String.fromCharCode(0x2460 + n - 1);
+  if (n >= 21 && n <= 35) return String.fromCharCode(0x3251 + n - 21);
+  return String(n);
+}
+
+function grammarState(){
+  const s = asObj(jget(GRAMMAR_KEY, null)) || {};
+  const last = asObj(s.last);
+  return {
+    n: Number.isInteger(s.n) && s.n >= 0 ? s.n : 0,
+    last: last && typeof last.date === "string" && Number.isInteger(last.k) && last.k >= 0 ? last : null
+  };
+}
+/* k counts every step ever taught; idx is where that is in the course and
+   round how many times round it has gone (1 or more = 복습 회차) */
+function grammarPick(iso){
+  const st = grammarState(), T = GRAMMAR_STEPS.length;
+  const k = st.last && st.last.date === iso ? st.last.k : st.n;
+  const recap = [k - 1, k - 2].filter((x) => x >= 0).map((x) => x % T);
+  return { k: k, idx: k % T, round: Math.floor(k / T), total: T, recap: recap };
+}
+
+/* ---- lo·le·se: today's lines that may carry one ----
+   Only a hint for Gemini, which decides what really is one (la before a
+   noun means "the"). Stand-alone le/les/se/me/te/nos/lo, and a word with one
+   glued to its end: dámelo, mételo, ponlo, hacerlo, dándole. */
+const PRON_SOLO = new Set(["lo", "le", "les", "se", "me", "te", "nos"]);
+const PRON_TAIL = /^(?:[a-zñü]*[áéíóú][a-zñü]*(?:me|te|se|nos|lo|la|los|las|le|les)|[a-zñ]+(?:ar|er|ir|ír|ando|iendo)(?:me|se|nos|lo|la|los|las|le|les)|(?:pon|haz|di|ten|ven|sal|ve)(?:me|te|se|nos|lo|la|los|las|le|les)(?:lo|la|los|las)?)$/;
+function pronounHits(lines){
+  const known = new Set(wordList());
+  const out = [];
+  for (const l of (Array.isArray(lines) ? lines : [])){
+    const s = cleanStr(l);
+    if (!s) continue;
+    const toks = s.toLowerCase().split(/[^a-záéíóúñü]+/).filter(Boolean);
+    if (toks.some((t) => PRON_SOLO.has(t) || (t.length > 4 && !known.has(t) && PRON_TAIL.test(t)))){
+      if (out.indexOf(s) < 0) out.push(s);
+    }
+    if (out.length >= 6) break;
+  }
+  return out;
+}
+
+/* the drill's own material, for a day when today's talk has none */
+const PRON_BASE = [
+  { es: "Dáselo.", ko: "그에게 그것을 줘.", who: "그에게", what: "그것을" },
+  { es: "Lo pongo aquí.", ko: "그거 여기 놓을게.", who: "", what: "그것을" },
+  { es: "Le doy la cuenta.", ko: "그에게 계산서를 줘요.", who: "그에게", what: "계산서를" },
+  { es: "Te lo traigo.", ko: "너한테 그거 가져다줄게.", who: "너에게", what: "그것을" },
+  { es: "Se lo dije.", ko: "그에게 그걸 말했어.", who: "그에게", what: "그것을" },
+  { es: "Pásamela.", ko: "그거 나한테 건네줘.", who: "나에게", what: "그것을" },
+  { es: "No lo toques.", ko: "그거 만지지 마.", who: "", what: "그것을" },
+  { es: "Se lava las manos.", ko: "그는 자기 손을 씻어.", who: "자기 자신에게", what: "손을" },
+  { es: "¿Me lo explicas otra vez?", ko: "나한테 그거 다시 설명해 줄래?", who: "나에게", what: "그것을" },
+  { es: "Ya se la di.", ko: "그에게 그거 벌써 줬어.", who: "그에게", what: "그것을" },
+  { es: "Dímelo.", ko: "나한테 그거 말해 줘.", who: "나에게", what: "그것을" },
+  { es: "Les sirvo la sopa.", ko: "그분들께 수프를 드려요.", who: "그 사람들에게", what: "수프를" }
+];
+const PRON_POINTS = 2, PRON_QUIZ = 3;
+const PRON_LEAD = "lo·le·se 연습이에요. 문장마다 ‘누구에게?’ 와 ‘무엇을?’ 만 짚어 볼게요.";
+const PRON_QUIZ_LEAD = "퀴즈 세 개예요. 한국어를 듣고, 3초 안에 스페인어로 말해 보세요.";
+
+/* What the drill teaches today: Gemini's points and quiz where it wrote
+   them, the base set filling whatever is missing. Never empty. */
+function pronounPlan(p, iso){
+  const L = PRON_BASE.length;
+  const start = ((dayNum(iso) * 5) % L + L) % L;          // a different few each day
+  const points = p && p.points ? p.points.slice(0, 3) : [];
+  const quiz = p && p.quiz ? p.quiz.slice(0, PRON_QUIZ) : [];
+  const used = new Set(points.concat(quiz).map((x) => foldEs(x.es)));
+  const spare = [];
+  for (let i = 0; i < L; i++){
+    const b = PRON_BASE[(start + i) % L];
+    if (!used.has(foldEs(b.es))) spare.push(b);
+  }
+  if (!points.length) for (const b of spare.splice(0, PRON_POINTS)) points.push(Object.assign({ today: false }, b));
+  while (quiz.length < PRON_QUIZ && spare.length){
+    const b = spare.shift();
+    quiz.push({ es: b.es, ko: b.ko });
+  }
+  return { points: points, quiz: quiz };
+}
+
+/* Everything the day's course needs, read before the script is written. */
+function curriculumPlan(sourceEs, iso){
+  const pick = newWordsPick(iso, sourceEs);
+  return {
+    iso: iso,
+    newWords: pick.words, wordsAgain: pick.again, oldWords: pick.oldWords,
+    learnedBefore: pick.learnedBefore,
+    wordReview: newWordsReview(iso),
+    grammar: grammarPick(iso),
+    pronounHits: pronounHits(sourceEs)
+  };
+}
+
+/* Called only after the lesson record has been saved. The words actually
+   taught become learned on that study day; the grammar step moves on once a
+   day — a 다시 만들기 on the same day finds it already moved and keeps it. */
+function curriculumCommit(lesson){
+  const c = lesson && asObj(lesson.curriculum);
+  if (!c || typeof c.iso !== "string") return;
+  const learned = newWordsLearned();
+  for (const w of (Array.isArray(c.newWords) ? c.newWords : [])){
+    if (w && w.es) learned[w.es] = { d: c.iso, ko: cleanStr(w.ko) };
+  }
+  jset(NEW_WORDS_KEY, { learned: learned });
+  if (c.grammar && Number.isInteger(c.grammar.k)){
+    const g = grammarState();
+    if (!(g.last && g.last.date === c.iso)) jset(GRAMMAR_KEY, { n: c.grammar.k + 1, last: { date: c.iso, k: c.grammar.k } });
+  }
 }
 
 /* ---------------- 0교시 — yesterday's review ----------------
@@ -555,8 +1147,10 @@ function reviewPlan(prev, iso){
 
 /* The content becomes a flat segment list (what gets spoken) plus display rows
    (what gets shown). A three-times repeat is several segments inside one row.
-   `prev`, when given, is the saved lesson before this one: 0교시 reviews it. */
-function lessonBuild(content, when, prev){
+   `prev`, when given, is the saved lesson before this one: 0교시 reviews it.
+   `cur`, when given, is the day's course plan (curriculumPlan): the new words
+   to review in 0교시, and the grammar step 5교시 teaches. */
+function lessonBuild(content, when, prev, cur){
   const segs = [], rows = [];
   let sid = 0, gid = 0;
 
@@ -594,9 +1188,20 @@ function lessonBuild(content, when, prev){
     });
   }
 
+  /* a quiz line: the Korean, a gap to answer in, the Spanish, a gap to repeat.
+     On screen the Spanish stays covered until it plays (see lessonTimeline). */
+  /* a meaning may be written "~ 뒤에": the ~ is for the eye, not the ear */
+  const plain = (s) => String(s || "").replace(/\s*~\s*/g, " ").replace(/\s+/g, " ").trim();
+  function quizRow(sec, item, badge){
+    const gg = row(sec, "pair", { es: item.es, ko: item.ko, badge: badge, quiz: true });
+    seg(sec, gg, "ko", plain(item.ko), P.quizThink);
+    seg(sec, gg, "es", item.es, P.quizFollow);
+  }
+
   const frames = Array.isArray(content.frames) ? content.frames : [];
+  const newWords = Array.isArray(content.newWords) ? content.newWords : [];
   const W = content.words.length, I = content.idioms.length, S = content.sentences.length;
-  const F = frames.length;
+  const F = frames.length, NW = newWords.length;
   /* the study day (03:00 local boundary, see studyDate in app.js), so the
      stored key, the spoken date and the label on screen are all the one day —
      a lesson made at half past midnight is still yesterday's lesson */
@@ -604,28 +1209,41 @@ function lessonBuild(content, when, prev){
   const dateLabel = Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) + "일";
 
   const plan = reviewPlan(prev, iso);
-  const R = plan ? plan.items.length : 0;
+  const wordQuiz = cur && Array.isArray(cur.wordReview) ? cur.wordReview : [];
+  const R = (plan ? plan.items.length : 0) + wordQuiz.length;
+  const G = cur && cur.grammar ? cur.grammar : null;
+  const step = G ? GRAMMAR_STEPS[G.idx] : null;
   /* something 0교시 just reviewed is said once today, not three times */
   const reviewed = new Set(plan ? plan.items.map((it) => it.key) : []);
   const again = (es) => reviewed.size > 0 && reviewed.has(reviewKey(String(es || "").replace(/\s*…$/, "")));
 
   /* intro */
+  const parts = [];
+  if (NW) parts.push("새 단어 " + NW + "개");
+  if (step) parts.push("문법은 ‘" + step.title.split(" — ")[0] + "’");
+  if (W) parts.push((NW ? "대화 단어 " : "단어 ") + W + "개");
+  if (W || I) parts.push("보너스 숙어 " + I + "개");
+  if (W || S) parts.push("문장 " + S + "개");
+  if (F) parts.push("말의 뼈대 " + F + "개");
   const introText = dateLabel + " 스페인어 수업입니다. " +
-    (plan ? "먼저 " + (plan.yesterday ? "어제" : "지난 수업에서") + " 배운 표현 " + R + "개를 복습하고, 오늘은 " : "오늘은 ") +
-    "단어 " + W + "개, 보너스 숙어 " +
-    I + "개, 문장 " + S + "개" + (F ? ", 말의 뼈대 " + F + "개" : "") +
+    (R ? "먼저 " + (plan ? (plan.yesterday ? "어제" : "지난 수업에서") : "지난번에") +
+         " 배운 표현 " + R + "개를 복습하고, 오늘은 " : "오늘은 ") +
+    parts.join(", ") + (parts.length ? ", 그리고 " : "") + "lo·le·se 연습" +
     "입니다. 눈 감고, 들리는 대로 따라 하세요.";
   let g = row(SEC.intro, "say", { ko: introText });
   seg(SEC.intro, g, "ko", introText, P.intro);
 
   /* 0교시 — yesterday, as a quiz: the meaning, a gap to answer, the answer.
-     On screen the Spanish stays covered until its segment plays. */
-  if (plan){
-    const Y = { id: SEC.yday.id, title: SEC.yday.title + " (" + plan.label + ")" };
+     On screen the Spanish stays covered until its segment plays. The new
+     words of the last day, and a couple from about a week ago, come after. */
+  if (plan || wordQuiz.length){
+    const label = plan ? plan.label : isoLabel(wordQuiz[0].d);
+    const Y = { id: SEC.yday.id, title: SEC.yday.title + " (" + label + ")" };
     const BADGE = { frame: "어제 뼈대", idiom: "어제 숙어", sent: "어제 문장" };
-    g = row(Y, "say", { ko: plan.lead });
-    seg(Y, g, "ko", plan.lead, P.lead);
-    for (const it of plan.items){
+    const lead = plan ? plan.lead : "먼저 지난번에 배운 새 단어를 복습할게요. " + REVIEW_HOW;
+    g = row(Y, "say", { ko: lead });
+    seg(Y, g, "ko", lead, P.lead);
+    for (const it of (plan ? plan.items : [])){
       const parts = reviewSegs(it);
       g = row(Y, "pair", { es: it.show, ko: it.ko, badge: BADGE[it.type], quiz: true });
       let exRow = null;
@@ -634,11 +1252,48 @@ function lessonBuild(content, when, prev){
         seg(Y, s.ex ? exRow : g, s.speaker, s.text, s.pause);
       }
     }
+    if (wordQuiz.length){
+      if (plan){
+        g = row(Y, "say", { ko: "이번엔 새 단어예요." });
+        seg(Y, g, "ko", "이번엔 새 단어예요.", P.lead);
+      }
+      for (const w of wordQuiz) quizRow(Y, w, w.when === "week" ? "지난주 단어" : "지난번 새 단어");
+    }
     g = row(Y, "say", { ko: REVIEW_END });
     seg(Y, g, "ko", REVIEW_END, P.lead);
   }
 
-  /* 1교시 — each word three times */
+  /* 1교시 — today's new words from the course list: the meaning, the word
+     three times, one easy example, now / already / going-to for a verb */
+  if (NW){
+    const lead0 = "오늘의 새 단어 " + NW + "개예요." +
+      (cur && cur.wordsAgain ? " 목록을 한 바퀴 다 돌아서, 오래전에 배운 단어도 다시 꺼냈어요." : "") +
+      " 들릴 때마다 소리 내어 따라 하세요.";
+    g = row(SEC.newwords, "say", { ko: lead0 });
+    seg(SEC.newwords, g, "ko", lead0, P.lead);
+    newWords.forEach((w, i) => {
+      const lead = ordKo(i + 1) + ". " + w.ko + ".";
+      g = row(SEC.newwords, "lead", { ko: lead });
+      seg(SEC.newwords, g, "ko", plain(lead), P.lead);
+      g = row(SEC.newwords, "pair", { es: w.es, ko: w.ko, badge: "×3" });
+      for (let k = 0; k < 3; k++){
+        seg(SEC.newwords, g, "es", w.es, P.wordEs);
+        seg(SEC.newwords, g, "ko", plain(w.ko), k === 2 ? P.wordKoLast : P.wordKo);
+      }
+      if (w.ex){
+        g = row(SEC.newwords, "pair", { es: w.ex.es, ko: w.ex.ko, badge: "예문" });
+        seg(SEC.newwords, g, "es", w.ex.es, P.frameEs);
+        seg(SEC.newwords, g, "ko", w.ex.ko, P.frameKo);
+      }
+      if (w.times && w.times.length){
+        tableRow(SEC.newwords, "지금 · 이미 · 앞으로",
+          "지금, 이미 끝난 일, 앞으로 할 일로 들어 볼게요.", w.times);
+      }
+      enLine(SEC.newwords, w);
+    });
+  }
+
+  /* 2교시 — each word three times */
   content.words.forEach((w, i) => {
     const lead = ordKo(i + 1) + ". " + w.ko + "." + (w.note ? " " + w.note : "");
     g = row(SEC.words, "lead", { ko: lead });
@@ -701,7 +1356,73 @@ function lessonBuild(content, when, prev){
     seg(SEC.sents, g, "es", s.es, P.full);
   });
 
-  /* 4교시 — the bones of speaking: what glues sentences, and the openings you
+  /* 5교시 — one step of the grammar course. The last two steps first, in a
+     line each; then today's: plain words, the rule in one line, examples, a
+     small table, English, and two quiz lines. Whatever Gemini did not write
+     falls back to the step's own rule and examples, so the step is never
+     skipped. */
+  if (step){
+    const gc = content.grammar || null;
+    if (G.recap.length){
+      g = row(SEC.grammar, "say", { ko: "지난 문법 다시 보기예요." });
+      seg(SEC.grammar, g, "ko", "지난 문법 다시 보기예요.", P.lead);
+      for (const r of G.recap){
+        const st = GRAMMAR_STEPS[r], x = st.ex[0];
+        g = row(SEC.grammar, "pair", { es: x.es, ko: x.ko, badge: st.title.split(" — ")[0] });
+        seg(SEC.grammar, g, "ko", sayKo(st.rule), P.lead);
+        seg(SEC.grammar, g, "es", x.es, P.frameEs);
+        seg(SEC.grammar, g, "ko", x.ko, P.frameKo);
+      }
+    }
+    const head = "오늘의 문법, " + ordKo(G.idx + 1) + " 칸이에요. " + step.title.replace(" — ", ", ") + "." +
+      (G.round > 0 ? " 한 바퀴를 다 돌아서, 이번은 복습 회차예요." : "");
+    g = row(SEC.grammar, "lead", { ko: head, badge: circNum(G.idx + 1) + "/" + G.total });
+    seg(SEC.grammar, g, "ko", sayKo(head), P.lead);
+    for (const line of (gc ? gc.explain : [])){
+      g = row(SEC.grammar, "say", { ko: line });
+      seg(SEC.grammar, g, "ko", sayKo(line), P.note);
+    }
+    const rule = (gc && gc.rule) || step.rule;
+    g = row(SEC.grammar, "note", { ko: "규칙: " + rule });
+    seg(SEC.grammar, g, "ko", "규칙 한 줄. " + sayKo(rule), P.sentMean);
+    const exs = gc && gc.examples.length >= 2 ? gc.examples : step.ex;
+    exs.forEach((x, k) => {
+      g = row(SEC.grammar, "pair", { es: x.es, ko: x.ko, badge: "예문" });
+      if (k === 0) seg(SEC.grammar, g, "ko", "예문으로 들어 볼게요.", P.lead);
+      seg(SEC.grammar, g, "es", x.es, P.frameEs);
+      seg(SEC.grammar, g, "ko", x.ko, P.frameKo);
+    });
+    if (gc && gc.table.length) tableRow(SEC.grammar, "한눈에 보기", "표로 한 번에 볼게요.", gc.table);
+    if (gc) enLine(SEC.grammar, gc);
+    const quiz = gc && gc.quiz.length ? gc.quiz : step.ex.map((x) => ({ es: x.es, ko: x.ko }));
+    g = row(SEC.grammar, "say", { ko: "퀴즈예요. " + REVIEW_HOW });
+    seg(SEC.grammar, g, "ko", "퀴즈예요. " + REVIEW_HOW, P.lead);
+    for (const q of quiz) quizRow(SEC.grammar, q, "퀴즈");
+  }
+
+  /* 6교시 — lo·le·se, every lesson, about two minutes: today's own lines when
+     they carry one, else the base set; who gets it, what is given; three
+     quiz lines. */
+  {
+    const pp = pronounPlan(content.pronoun, iso);
+    g = row(SEC.pron, "say", { ko: PRON_LEAD });
+    seg(SEC.pron, g, "ko", PRON_LEAD, P.lead);
+    for (const p of pp.points){
+      g = row(SEC.pron, "pair", { es: p.es, ko: p.ko, badge: p.today ? "오늘 문장" : "예문" });
+      seg(SEC.pron, g, "es", p.es, P.frameEs);
+      seg(SEC.pron, g, "ko", p.ko, P.frameKo);
+      const ask = [p.who ? "누구에게? " + p.who : "", p.what ? "무엇을? " + p.what : ""].filter(Boolean);
+      if (ask.length){
+        g = row(SEC.pron, "note", { ko: ask.join(" · ") });
+        seg(SEC.pron, g, "ko", ask.join(". ") + ".", P.note);
+      }
+    }
+    g = row(SEC.pron, "say", { ko: PRON_QUIZ_LEAD });
+    seg(SEC.pron, g, "ko", PRON_QUIZ_LEAD, P.lead);
+    for (const q of pp.quiz) quizRow(SEC.pron, q, "퀴즈");
+  }
+
+  /* 7교시 — the bones of speaking: what glues sentences, and the openings you
      keep while swapping the verb. Meaning, today's real use, swapped examples,
      then the same frame for each person. */
   frames.forEach((f, i) => {
@@ -750,7 +1471,12 @@ function lessonBuild(content, when, prev){
     }
   });
 
-  /* 5교시 — every word once more, quickly, then every frame */
+  /* 마무리 — every new word and every word once more, quickly, then every frame */
+  newWords.forEach((w) => {
+    g = row(SEC.review, "pair", { es: w.es, ko: w.ko });
+    seg(SEC.review, g, "es", w.es, P.reviewEs);
+    seg(SEC.review, g, "ko", plain(w.ko), P.reviewKo);
+  });
   content.words.forEach((w) => {
     g = row(SEC.review, "pair", { es: w.es, ko: w.ko });
     seg(SEC.review, g, "es", w.es, P.reviewEs);
@@ -771,12 +1497,25 @@ function lessonBuild(content, when, prev){
     if (segs[i].sectionId !== segs[i + 1].sectionId) segs[i].pauseAfter += P.section;
   }
 
-  return {
+  /* what curriculumCommit records once this lesson is saved; the counts are
+     what the footer shows — the totals as they will stand after this lesson */
+  const oldOnes = cur && Array.isArray(cur.oldWords) ? cur.oldWords : [];
+  const learnedNow = cur ? cur.learnedBefore + newWords.filter((w) => oldOnes.indexOf(w.es) < 0).length : 0;
+  const course = cur ? {
+    iso: iso,
+    newWords: newWords.map((w) => ({ es: w.es, ko: w.ko })),
+    grammar: G ? { k: G.k, idx: G.idx } : null
+  } : null;
+
+  return Object.assign({
     date: iso, dateLabel: dateLabel,
-    counts: Object.assign({ words: W, idioms: I, sentences: S, frames: F }, plan ? { review: R } : {}),
+    counts: Object.assign({ words: W, idioms: I, sentences: S, frames: F },
+                          (plan || wordQuiz.length) ? { review: R } : {},
+                          cur ? { newWords: NW, learned: learnedNow } : {},
+                          G ? { grammarAt: G.idx + 1, grammarOf: G.total } : {}),
     reviewOf: plan ? plan.date : "",
     segments: segs, rows: rows
-  };
+  }, course ? { curriculum: course } : {});
 }
 
 /* Start and end of every segment, and the boundary of every display row.
@@ -1893,6 +2632,8 @@ function renderFoot(){
     openLesson(true).catch((e) => lessonNotice((e && e.message) || String(e)));
   };
   $("lMeta").textContent =
+    (l.counts.newWords ? "새 단어 누적 " + l.counts.learned + "개 · " : "") +
+    (l.counts.grammarAt ? "문법 진도 " + circNum(l.counts.grammarAt) + "/" + l.counts.grammarOf + " · " : "") +
     (l.counts.review ? "복습 " + l.counts.review + " · " : "") +
     "단어 " + l.counts.words + " · 숙어 " + l.counts.idioms + " · 문장 " + l.counts.sentences +
     (l.counts.frames ? " · 뼈대 " + l.counts.frames : "") +
@@ -2656,14 +3397,9 @@ async function openLesson(force){
 
     if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
 
-    const rows = todaysEntries();
-    if (!rows.length){
-      lessonMessage("오늘 나눈 대화가 없습니다.", "몇 마디 통역하고 나서 다시 눌러주십시오.");
-      $("lFoot").innerHTML = '<button class="mini" id="lPastBtn" type="button">🗂 지난 수업</button>';
-      $("lPastBtn").onclick = showPast;
-      return;
-    }
-    await makeLesson(rows);
+    /* no conversation today is no longer a reason to stop: the new words,
+       the grammar step and the lo·le·se drill do not need one */
+    await makeLesson(todaysEntries());
   } finally {
     lessonOpening = false;
   }
@@ -2755,19 +3491,24 @@ async function makeLessonRun(rows){
      disables the microphone, the typing box and this button for good */
   try {
     showError("");
-    lessonMessage("대본을 쓰는 중…", "오늘 대화 " + rows.length + "건을 수업으로 엮고 있습니다.");
+    lessonMessage("대본을 쓰는 중…", rows.length
+      ? "오늘 대화 " + rows.length + "건을 수업으로 엮고 있습니다."
+      : "오늘은 대화 기록이 없어, 새 단어와 문법으로 수업을 엮고 있습니다.");
     $("lFoot").innerHTML = '<button class="mini" id="lCancel" type="button">그만두기</button>';
     $("lCancel").onclick = () => { lessonCancelled = true; cancelTts(); lessonBusySub("그만두는 중…"); };
     setStatus("수업 대본을 만드는 중…");
 
-    const content = await lessonWriteScript(rows);
+    /* the day's course — new words, grammar step, lo·le·se lines — is read
+       first, because the one script call has to explain it */
+    const now = new Date();
+    const cur = curriculumPlan(rows.map((e) => spanishOf(e)), studyDate(now));
+    const content = await lessonWriteScript(rows, cur);
     if (lessonCancelled) throw new Error("__cancelled__");
 
-    const now = new Date();
     /* 0교시 is read out of the last saved lesson; a storage error only costs the review */
     const prev = await lessonPrevFor(studyDate(now)).catch(() => null);
     if (lessonCancelled) throw new Error("__cancelled__");
-    const lesson = lessonBuild(content, now, prev);
+    const lesson = lessonBuild(content, now, prev, cur);
     let blob = null, fellBack = "";
 
     if (lset.engine === "cloud" && lset.ttsKey){
@@ -2796,7 +3537,9 @@ async function makeLessonRun(rows){
     };
 
     let saveNote = "";
-    try { await lessonSave(rec); }
+    /* the words and the grammar step count as learned only once the lesson
+       that teaches them is safely stored */
+    try { await lessonSave(rec); curriculumCommit(lesson); }
     catch (e) {
       /* not fatal — the lesson still plays — but it will have to be paid for
          again next time, so the user should know */
@@ -3336,7 +4079,9 @@ function exportHtml(lesson, b64){
 exportAskCss(),
 '</style></head><body>',
 '<header><h1>' + esc(lesson.dateLabel) + ' 스페인어 수업</h1>',
-'<div class="sub">' + (lesson.counts.review ? '복습 ' + lesson.counts.review + ' · ' : '') +
+'<div class="sub">' + (lesson.counts.newWords ? '새 단어 ' + lesson.counts.newWords + ' · ' : '') +
+  (lesson.counts.grammarAt ? '문법 ' + circNum(lesson.counts.grammarAt) + '/' + lesson.counts.grammarOf + ' · ' : '') +
+  (lesson.counts.review ? '복습 ' + lesson.counts.review + ' · ' : '') +
   '단어 ' + lesson.counts.words + ' · 숙어 ' + lesson.counts.idioms +
   ' · 문장 ' + lesson.counts.sentences +
   (lesson.counts.frames ? ' · 뼈대 ' + lesson.counts.frames : '') + ' · ' + fmtClock(lesson.totalMs) +
@@ -3619,6 +4364,22 @@ function lessonFillSettings(){
   }).catch(() => {});
   const vm = $("lVoiceMsg");
   if (vm) vm.textContent = lessonVoiceLine();
+  lessonFillProgress();
+}
+
+/* 설정 › 수업 진도 */
+function lessonFillProgress(){
+  const box = $("lProgress");
+  if (!box) return;
+  const g = grammarState(), T = GRAMMAR_STEPS.length;
+  box.textContent = "새 단어 진도: " + newWordsCount() + "개 배움 (목록 " + wordList().length + "개)" +
+    " · 다음 문법: " + circNum(g.n % T + 1) + "/" + T + (g.n >= T ? " (복습 회차)" : "");
+}
+function lessonResetWords(){
+  if (!confirm("새 단어 진도를 처음부터 다시 시작합니다.\n지금까지 배운 단어 기록(" + newWordsCount() +
+               "개)이 지워지고 되돌릴 수 없습니다. 계속할까요?")) return;
+  jset(NEW_WORDS_KEY, { learned: {} });
+  lessonFillProgress();
 }
 
 function lessonSaveSettings(){
@@ -3854,6 +4615,8 @@ async function lessonTestVoice(){
   if (tryEs) tryEs.onclick = () => { lessonPreview("es").catch(() => {}); };
   const tryKo = $("lTryKo");
   if (tryKo) tryKo.onclick = () => { lessonPreview("ko").catch(() => {}); };
+  const wReset = $("lWordsReset");
+  if (wReset) wReset.onclick = lessonResetWords;
   const dlg = $("lesson");
   if (dlg) dlg.addEventListener("close", () => {
     stopPlayer();
