@@ -303,12 +303,50 @@
 <dialog id="settings">
   <div class="dlg-body">
     <h2>설정</h2>
-    <p class="sub">API 키는 이 기기에만 저장되며 구글 외 어디로도 전송되지 않습니다.</p>
+    <p class="sub">API 키는 이 기기에만 저장되며 구글(Gemini·음성)과 Anthropic(Claude) 외 어디로도 전송되지 않습니다.</p>
 
     <h3>연결</h3>
     <label for="apiKey">Gemini API 키</label>
     <input type="password" id="apiKey" placeholder="AIza..." autocomplete="off" spellcheck="false">
     <div class="note">키 발급: <b>aistudio.google.com/apikey</b></div>
+
+    <label for="claudeKey">Claude API 키 (선택)</label>
+    <input type="password" id="claudeKey" placeholder="sk-ant-..." autocomplete="off" spellcheck="false">
+    <label for="claudeModel">Claude 모델</label>
+    <select id="claudeModel">
+      <option value="claude-sonnet-5-5">Claude Sonnet 5.5 (기본 — 빠르고 저렴)</option>
+      <option value="claude-opus-5-5">Claude Opus 5.5 (더 꼼꼼, 요금 2배)</option>
+    </select>
+    <div style="margin-top:10px">
+      <button class="mini" id="claudeCheck" type="button">확인</button>
+      <button class="mini" id="claudeTest" type="button">실제 호출 시험</button>
+    </div>
+    <div class="note" id="claudeMsg"></div>
+    <div class="note">
+      넣으면 <b>수업 대본 만들기</b>와 수업 중 <b>글로 쓴 질문</b>은 Claude 가 맡습니다.
+      통역·💬 요약·<b>음성 질문</b>은 지금처럼 Gemini 가 합니다(Claude 는 음성을 듣지 못합니다).
+      Claude 가 실패하면 Gemini 로 저절로 다시 합니다. 키 발급: <b>platform.claude.com</b>.
+      «확인» 은 형식만 보고 요금이 들지 않습니다. «실제 호출 시험» 은 아주 짧은 요청 한 번이 청구됩니다.
+    </div>
+
+    <h3>키 옮기기</h3>
+    <div style="margin-top:4px">
+      <button class="mini" id="keySend" type="button">다른 기기로 키 보내기</button>
+    </div>
+    <label for="keyRecvIn">키 받기 (받은 링크 붙여넣기)</label>
+    <input type="text" id="keyRecvIn" placeholder="https://…/interprete/#import=…" autocomplete="off" spellcheck="false" autocapitalize="off">
+    <div style="margin-top:8px">
+      <button class="mini" id="keyRecv" type="button">이 기기에 넣기</button>
+    </div>
+    <div class="note" id="keyMsg"></div>
+    <div class="note">
+      이 기기의 Gemini·Cloud TTS·Claude 키(있는 것만)를 링크 하나로 만듭니다. 키는 링크의 <b>#</b> 뒤에만 들어가
+      서버로는 전송되지 않습니다. 링크는 카카오톡 <b>나와의 채팅</b>으로만 보내고, 넣은 뒤 메시지를 지우십시오.<br><br>
+      링크를 눌렀는데 홈 화면 앱이 아니라 브라우저나 카카오톡 안에서 열리면, 키는 그 브라우저에만 들어갑니다.
+      특히 아이폰의 홈 화면 앱과 카카오톡 안의 화면은 저장소가 따로입니다. 그럴 때는 링크를 길게 눌러 복사한 뒤
+      <b>홈 화면 앱 → 설정 → 키 받기</b> 칸에 붙여넣으십시오. 링크를 눌러 열면 브라우저 방문 기록에 남으므로,
+      붙여넣기가 더 깨끗합니다(눌러 열었다면 방문 기록에서 지우십시오).
+    </div>
 
     <h3>모델</h3>
     <label for="model">사용할 모델</label>

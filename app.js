@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-10-22.2";
+const APP_VERSION = "2026-10-25.1";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -24,9 +24,20 @@ const PRICES = {
   "gemini-3.1-flash-lite":  { in: 0.25, out: 1.50, audio: 0.50 },
   "gemini-2.5-flash":       { in: 0.30, out: 2.50, audio: 1.00 },
   "gemini-2.5-flash-lite":  { in: 0.10, out: 0.40, audio: 0.30 },
-  "gemini-3.1-pro":         { in: 2.00, out: 12.00 }
+  "gemini-3.1-pro":         { in: 2.00, out: 12.00 },
+  /* Anthropic list prices, platform.claude.com/docs/en/about-claude/models/overview
+     (checked 2026-10-25). Thinking tokens bill as output. */
+  "claude-sonnet-5-5":      { in: 2.00, out: 10.00 },
+  "claude-opus-5-5":        { in: 4.00, out: 20.00 }
 };
 const FALLBACK_PRICE = { in: 0.50, out: 3.00 };
+
+/* The two Claude models the settings offer. IDs are the Claude API IDs as
+   listed in Anthropic's models overview; nothing else is ever sent. */
+const CLAUDE_MODELS = {
+  "claude-sonnet-5-5": "Claude Sonnet 5.5 (기본 — 빠르고 저렴)",
+  "claude-opus-5-5":   "Claude Opus 5.5 (더 꼼꼼, 요금 2배)"
+};
 
 const DEFAULTS = {
   apiKey: "",
@@ -37,7 +48,11 @@ const DEFAULTS = {
   silenceMs: 2000,
   stream: true,
   freeLimit: 250,
-  fx: 18
+  fx: 18,
+  /* optional: when set, the lesson script and typed lesson questions go to
+     Claude; interpreting, the summary and spoken questions stay on Gemini */
+  claudeKey: "",
+  claudeModel: "claude-sonnet-5-5"
 };
 
 const SILENCE_RMS = 0.012;
@@ -61,6 +76,8 @@ const el = {};
   "settings","saveSettings","shareBtn","apiKey","model","dialect",
   "autoSpeak","autoStop","silence","stream","freeLimit","fx",
   "verNow","checkUpdate","verMsg",
+  "claudeKey","claudeModel","claudeCheck","claudeTest","claudeMsg",
+  "keySend","keyRecvIn","keyRecv","keyMsg",
   "usage","closeUsage","exportBtn","resetUsage",
   "uMonthCost","uMonthPeso","uDayReq","uDayLeft","uDayIn","uDayOut","uDayCost",
   "uMonReq","uMonIn","uMonOut","uAvg","uPrices"
@@ -84,6 +101,8 @@ let settings = Object.assign({}, DEFAULTS, jget("interp.settings", {}));
   if (settings.model === "gemini-3.5-flash-lite") settings.model = DEFAULTS.model;
   if (settings.silenceMs && settings.silenceMs < 1500) settings.silenceMs = DEFAULTS.silenceMs;
   delete settings.modelFast; delete settings.modelGood; delete settings.mode; delete settings.tidy;
+  if (!CLAUDE_MODELS[settings.claudeModel]) settings.claudeModel = DEFAULTS.claudeModel;
+  if (typeof settings.claudeKey !== "string") settings.claudeKey = "";
 })();
 
 function persist(){ jset("interp.settings", settings); }
@@ -201,9 +220,13 @@ function refreshUsageDialog(){
   el.uPrices.innerHTML =
     "적용 중인 단가 (100만 토큰당)<br>" +
     settings.model + " — 입력 $" + p.in + " / 출력 $" + p.out +
-      (p.audio ? " / 음성 $" + p.audio : "") + "<br><br>" +
+      (p.audio ? " / 음성 $" + p.audio : "") + "<br>" +
+    (settings.claudeKey
+      ? settings.claudeModel + " — 입력 $" + priceFor(settings.claudeModel).in +
+        " / 출력 $" + priceFor(settings.claudeModel).out + " (수업 대본·글 질문)<br>"
+      : "") + "<br>" +
     "음성은 1초에 " + AUDIO_TOKENS_PER_SEC + "토큰으로 계산됩니다. " +
-    "요금은 이 단가표로 추산한 값이며 구글의 실제 청구서와 다를 수 있습니다.";
+    "요금은 이 단가표로 추산한 값이며 구글·Anthropic 의 실제 청구서와 다를 수 있습니다.";
 }
 
 /* ---------------- prompt ---------------- */
@@ -1086,6 +1109,160 @@ async function callPlain(systemInstr, input, genConfig, audioMs){
   return text.trim();
 }
 
+/* ---------------- Claude (optional) ----------------
+
+   Only text goes here: the lesson script and typed lesson questions. The key
+   travels in the x-api-key header, never in a URL. Anthropic answers a browser
+   only when the request carries anthropic-dangerous-direct-browser-access
+   (measured 2026-10-25: without it the reply has no Access-Control-Allow-Origin
+   and the browser drops it). */
+const CLAUDE_URL = "https://api.anthropic.com/v1/messages";
+const CLAUDE_API_VERSION = "2026-10-21";
+
+/* the shape of an Anthropic API key, checked without calling anything */
+function claudeKeyShape(k){
+  return /^sk-ant-[A-Za-z0-9_-]{20,300}$/.test(String(k || ""));
+}
+
+/* An error that is worth handing to Gemini rather than showing. `partial` is
+   whatever text had arrived, so a caller with no Gemini key can still try to
+   salvage it. */
+function claudeError(msg, status, partial){
+  const e = new Error(msg);
+  e.claude = true;
+  e.status = status || 0;
+  e.partial = partial || "";
+  return e;
+}
+
+/* One streamed Messages call. Streaming keeps a long script from sitting on
+   an idle connection that a mobile network may drop. Resolves with the text;
+   a cut-off reply, a refusal or an empty one rejects. */
+async function callClaude(system, text, opts){
+  opts = opts || {};
+  const want = opts.model || settings.claudeModel;
+  const model = CLAUDE_MODELS[want] ? want : DEFAULTS.claudeModel;
+  const key = opts.key || settings.claudeKey;
+  const ctl = typeof AbortController === "function" ? new AbortController() : null;
+  const timer = ctl && opts.timeoutMs ? setTimeout(() => ctl.abort(), opts.timeoutMs) : null;
+  let acc = "", inTok = 0, outTok = 0, stop = "", failMsg = "";
+  try {
+    let res;
+    try {
+      res = await fetch(CLAUDE_URL, {
+        method: "POST",
+        signal: ctl ? ctl.signal : undefined,
+        headers: {
+          "x-api-key": key,
+          "anthropic-version": CLAUDE_API_VERSION,
+          "anthropic-dangerous-direct-browser-access": "true",
+          "content-type": "application/json"
+        },
+        body: JSON.stringify({
+          model: model,
+          max_tokens: opts.maxTokens || 8000,
+          stream: true,
+          system: system,
+          output_config: { effort: opts.effort || "medium" },
+          messages: [{ role: "user", content: String(text) }]
+        })
+      });
+    } catch (e) {
+      throw claudeError(ctl && ctl.signal.aborted ? "Claude 응답 시간 초과" : "Claude 연결 실패", 0);
+    }
+    if (!res.ok){
+      const raw = await res.text().catch(() => "");
+      let j = null; try { j = JSON.parse(raw); } catch (e) {}
+      const m = (j && j.error && j.error.message) || raw.slice(0, 200);
+      const why = res.status === 401 || res.status === 403
+        ? "Claude 키가 잘못되었거나 권한이 없습니다. 설정에서 키를 확인하십시오.\n"
+        : res.status === 429 ? "Claude 요청 한도에 걸렸습니다. 잠시 뒤 다시 하십시오.\n" : "";
+      throw claudeError(why + "Claude API " + res.status + " (" + model + ") " + m, res.status);
+    }
+    const onEv = (ev) => {
+      if (!ev || typeof ev !== "object") return;
+      if (ev.type === "message_start" && ev.message && ev.message.usage){
+        const u = ev.message.usage;
+        inTok = (u.input_tokens || 0) + (u.cache_read_input_tokens || 0) + (u.cache_creation_input_tokens || 0);
+        outTok = u.output_tokens || outTok;
+      } else if (ev.type === "content_block_delta" && ev.delta && ev.delta.type === "text_delta"){
+        acc += ev.delta.text || "";
+      } else if (ev.type === "message_delta"){
+        if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason;
+        if (ev.usage && typeof ev.usage.output_tokens === "number") outTok = ev.usage.output_tokens;
+      } else if (ev.type === "error"){
+        failMsg = (ev.error && ev.error.message) || "stream error";
+      }
+    };
+    try {
+      if (res.body && res.body.getReader){
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;){
+          const r = await reader.read();
+          if (r.done) break;
+          buf = feedSse(buf + dec.decode(r.value, { stream: true }), onEv);
+        }
+        feedSse(buf + "\n", onEv);
+      } else {
+        feedSse((await res.text()) + "\n", onEv);
+      }
+    } catch (e) {
+      throw claudeError(ctl && ctl.signal.aborted ? "Claude 응답 시간 초과" : "Claude 응답이 끊겼습니다", 0, acc);
+    }
+    /* billed whether or not the text turns out usable */
+    if (inTok || outTok){
+      addUsage(inTok, outTok, 0, computeCost(model, inTok, outTok, 0));
+      refreshMeter();
+    }
+    if (failMsg) throw claudeError("Claude 오류: " + failMsg, 0, acc);
+    if (stop === "max_tokens") throw claudeError("Claude 답이 길이 한도에서 잘렸습니다", 0, acc);
+    if (stop === "refusal") throw claudeError("Claude 가 답을 거절했습니다", 0, acc);
+    if (!acc.trim()) throw claudeError("Claude 답이 비어 있습니다", 0, acc);
+    return acc.trim();
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+/* Text routing. With a Claude key the request goes to Claude first; any
+   failure (network, 4xx/5xx, cut off, refused, or `validate` throwing on the
+   text) hands the same request to Gemini through `geminiCall`, provided there
+   is a Gemini key. Without a Claude key it is exactly `geminiCall()`.
+
+   `route` is shared by retries of one job: once Claude has failed and Gemini
+   is there, the retry goes straight to Gemini instead of paying Claude again.
+   With no Gemini key a soft failure (cut off, unparseable) returns Claude's
+   text so the caller's own salvage can still use it. */
+async function viaClaude(system, text, geminiCall, opts){
+  opts = opts || {};
+  const route = opts.route || {};
+  if (!settings.claudeKey || (route.claudeFailed && settings.apiKey)) return geminiCall();
+  let err = null, got = "";
+  try {
+    got = await callClaude(system, text, opts);
+    if (opts.validate) opts.validate(got);
+    route.by = "claude";
+    return got;
+  } catch (e) {
+    err = e;
+  }
+  route.claudeFailed = true;
+  if (!settings.apiKey){
+    route.by = "claude";
+    /* nothing to fall back to: the text Claude did send (a complete reply that
+       failed `validate`, or a cut-off one) goes to the caller's own salvage */
+    const text2 = got || (err && err.partial) || "";
+    if (text2) return text2;
+    throw err;
+  }
+  route.by = "gemini";
+  const note = "Claude 실패 → Gemini 로 대신";
+  try { if (opts.onFallback) opts.onFallback(note, err); else setStatus(note); } catch (e) {}
+  return geminiCall();
+}
+
 function todaysEntries(){
   const d = todayKey();
   /* each entry's own timestamp goes through the same 03:00 rule — comparing it
@@ -1199,6 +1376,11 @@ function openSettings(){
   el.stream.checked = !!settings.stream;
   el.freeLimit.value = settings.freeLimit;
   el.fx.value = settings.fx;
+  el.claudeKey.value = settings.claudeKey;
+  el.claudeModel.value = CLAUDE_MODELS[settings.claudeModel] ? settings.claudeModel : DEFAULTS.claudeModel;
+  el.claudeMsg.textContent = "";
+  el.keyMsg.textContent = "";
+  el.keyRecvIn.value = "";
   if (typeof lessonFillSettings === "function") lessonFillSettings();
   openDlg(el.settings);
 }
@@ -1214,6 +1396,8 @@ el.saveSettings.onclick = () => {
   settings.stream = el.stream.checked;
   settings.freeLimit = Math.max(0, Number(el.freeLimit.value) || 0);
   settings.fx = Math.max(0, Number(el.fx.value) || 0);
+  settings.claudeKey = el.claudeKey.value.trim();
+  settings.claudeModel = CLAUDE_MODELS[el.claudeModel.value] ? el.claudeModel.value : DEFAULTS.claudeModel;
   persist();
   if (typeof lessonSaveSettings === "function") lessonSaveSettings();
   closeDlg(el.settings);
@@ -1222,6 +1406,193 @@ el.saveSettings.onclick = () => {
   setStatus(settings.apiKey ? "준비됨 — 버튼을 누르고 말하십시오" : "API 키를 먼저 넣어주십시오");
 };
 el.shareBtn.onclick = shareApp;
+
+/* 확인: the key's shape only — no request, nothing billed */
+el.claudeCheck.onclick = () => {
+  const k = el.claudeKey.value.trim();
+  el.claudeMsg.textContent = !k ? "Claude 키가 비어 있습니다 (없어도 됩니다 — 그러면 전부 Gemini 로 합니다)."
+    : claudeKeyShape(k) ? "형식은 맞습니다 (sk-ant-…). 실제로 되는지는 «실제 호출 시험» 으로 확인하십시오."
+    : "형식이 맞지 않습니다. sk-ant- 로 시작하는 키를 그대로 붙여넣으십시오.";
+};
+/* one real, tiny call — only when this button is pressed */
+el.claudeTest.onclick = async () => {
+  const k = el.claudeKey.value.trim();
+  if (!claudeKeyShape(k)){ el.claudeCheck.onclick(); return; }
+  el.claudeTest.disabled = true;
+  el.claudeMsg.textContent = "Claude 에 한 번 물어보는 중…";
+  try {
+    await callClaude("Reply with the single word: ok", "ping",
+                     { key: k, model: el.claudeModel.value, maxTokens: 512, effort: "low", timeoutMs: 30000 });
+    el.claudeMsg.textContent = "연결 성공 — " + el.claudeModel.value + " 가 답했습니다. 저장을 눌러야 적용됩니다.";
+  } catch (e) {
+    /* a reply that came back but was cut or empty still proves the key works */
+    el.claudeMsg.textContent = e && e.claude && !e.status && /잘렸|비어/.test(e.message)
+      ? "연결 성공 (짧은 시험 답). 저장을 눌러야 적용됩니다."
+      : "실패: " + ((e && e.message) || String(e));
+  } finally {
+    el.claudeTest.disabled = false;
+  }
+};
+
+/* ---------------- moving keys to another device ----------------
+
+   The keys ride in the URL FRAGMENT (#import=…). A fragment is never sent in
+   an HTTP request, so neither GitHub Pages nor a link-preview fetcher sees
+   it, and it is not part of a Referer. The receiving page reads it, removes
+   it from the address bar with history.replaceState, and only then asks. */
+const KEY_LINK_BASE = "https://pjk641752.github.io/interprete/";
+const GOOGLE_KEY_RE = /^[A-Za-z0-9_-]{20,200}$/;
+
+function b64urlEncode(str){
+  const bytes = new TextEncoder().encode(str);
+  let bin = "";
+  for (let i = 0; i < bytes.length; i++) bin += String.fromCharCode(bytes[i]);
+  return btoa(bin).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function b64urlDecode(s){
+  let t = String(s).replace(/-/g, "+").replace(/_/g, "/");
+  while (t.length % 4) t += "=";
+  const bin = atob(t);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+/* what the dialog shows right now, falling back to what is saved */
+function keysToSend(){
+  const ttsBox = document.getElementById("lTtsKey");
+  const g = (el.apiKey.value || settings.apiKey || "").trim();
+  const c = (el.claudeKey.value || settings.claudeKey || "").trim();
+  const t = ((ttsBox && ttsBox.value) || (typeof lset !== "undefined" && lset.ttsKey) || "").trim();
+  const out = {};
+  if (GOOGLE_KEY_RE.test(g)) out.g = g;
+  if (GOOGLE_KEY_RE.test(t)) out.t = t;
+  if (claudeKeyShape(c)) out.c = c;
+  return out;
+}
+
+function makeKeyLink(keys){
+  return KEY_LINK_BASE + "#import=" + b64urlEncode(JSON.stringify(Object.assign({ v: 1 }, keys)));
+}
+
+/* Accepts the whole link, or just the part after #import=. Returns only keys
+   of the right shape; anything else in the payload is ignored. */
+function parseKeyLink(s){
+  const m = /import=([A-Za-z0-9_-]+)/.exec(String(s || ""));
+  if (!m) throw new Error("키 링크가 아닙니다.");
+  let obj = null;
+  try { obj = JSON.parse(b64urlDecode(m[1])); } catch (e) { throw new Error("키 링크가 깨져 있습니다. 링크 전체를 다시 복사하십시오."); }
+  if (!obj || typeof obj !== "object") throw new Error("키 링크가 깨져 있습니다.");
+  const out = {};
+  if (typeof obj.g === "string" && GOOGLE_KEY_RE.test(obj.g)) out.g = obj.g;
+  if (typeof obj.t === "string" && GOOGLE_KEY_RE.test(obj.t)) out.t = obj.t;
+  if (typeof obj.c === "string" && claudeKeyShape(obj.c)) out.c = obj.c;
+  if (!Object.keys(out).length) throw new Error("링크 안에 쓸 수 있는 키가 없습니다.");
+  return out;
+}
+
+const KEY_NAMES = { g: "Gemini 키", t: "Cloud TTS 키", c: "Claude 키" };
+
+function storedKey(k){
+  if (k === "g") return settings.apiKey || "";
+  if (k === "c") return settings.claudeKey || "";
+  if (typeof lset !== "undefined") return lset.ttsKey || "";
+  const ls = jget("interp.lesson", {});
+  return (ls && ls.ttsKey) || "";
+}
+
+/* one line per key: new, replaces a different key, or already the same */
+function keyImportPlan(keys){
+  return Object.keys(keys).map((k) => {
+    const had = storedKey(k);
+    const state = !had ? "새로 넣음" : had === keys[k] ? "이미 같음" : "기존 키를 덮어씀";
+    return "· " + KEY_NAMES[k] + " (…" + keys[k].slice(-4) + ") — " + state;
+  });
+}
+
+function applyKeys(keys){
+  if (keys.g) settings.apiKey = keys.g;
+  if (keys.c) settings.claudeKey = keys.c;
+  persist();
+  if (keys.t){
+    if (typeof lset !== "undefined"){
+      if (lset.ttsKey !== keys.t){
+        /* a new key is a new project: the remembered voice pick is redone,
+           exactly as saving a new key in the dialog does */
+        lset.voiceEs = ""; lset.voiceEsCode = ""; lset.voiceKo = ""; lset.voiceKoCode = "";
+      }
+      lset.ttsKey = keys.t;
+      lset.engine = "cloud";
+      lpersist();
+    } else {
+      const ls = jget("interp.lesson", {}) || {};
+      if (ls.ttsKey !== keys.t){ ls.voiceEs = ""; ls.voiceEsCode = ""; ls.voiceKo = ""; ls.voiceKoCode = ""; }
+      ls.ttsKey = keys.t;
+      ls.engine = "cloud";
+      jset("interp.lesson", ls);
+    }
+  }
+}
+
+/* asks, then stores; returns true when keys were stored */
+function importKeys(keys){
+  const plan = keyImportPlan(keys);
+  const ok = confirm("이 링크의 키 " + plan.length + "개를 이 기기에 넣을까요?\n\n" + plan.join("\n") +
+                     "\n\n넣은 뒤 링크를 보낸 메시지는 지우십시오. 링크를 눌러 여셨다면 브라우저 방문 기록에서도 지우십시오" +
+                     " (설정 → 키 받기 칸에 붙여넣으면 기록이 남지 않습니다).");
+  if (!ok) return false;
+  applyKeys(keys);
+  refreshMeter();
+  if (el.settings.open) openSettings();          // the dialog shows the new values
+  setStatus(settings.apiKey ? "키를 넣었습니다 — 준비됨" : "키를 넣었습니다");
+  return true;
+}
+
+/* the link was opened: take the keys out of the address bar FIRST, whatever
+   the answer to the question turns out to be */
+function importFromHash(){
+  const h = location.hash || "";
+  if (!/^#import=/.test(h)) return;
+  try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+  let keys = null;
+  try { keys = parseKeyLink(h); }
+  catch (e) { alert((e && e.message) || "키 링크를 읽지 못했습니다."); return; }
+  importKeys(keys);
+}
+
+el.keySend.onclick = async () => {
+  const keys = keysToSend();
+  const n = Object.keys(keys).length;
+  if (!n){ el.keyMsg.textContent = "보낼 키가 없습니다. 먼저 키를 넣으십시오."; return; }
+  const link = makeKeyLink(keys);
+  const text = "통역기 키 " + n + "개 (" + Object.keys(keys).map((k) => KEY_NAMES[k]).join(", ") + ")\n" +
+               "받을 기기에서 이 링크를 여십시오. 넣은 뒤 이 메시지는 지우십시오.\n" + link;
+  let done = false;
+  if (navigator.share){
+    try { await navigator.share({ text: text }); done = true; }
+    catch (e) { if (e && e.name === "AbortError") { el.keyMsg.textContent = "보내기를 취소했습니다."; return; } }
+  }
+  if (!done){
+    try { await navigator.clipboard.writeText(link); done = true; } catch (e) {}
+  }
+  el.keyMsg.textContent = done
+    ? "키 " + n + "개 링크를 만들었습니다. 카카오톡 «나와의 채팅» 으로만 보내고, 넣은 뒤 메시지를 지우십시오." +
+      " 복사로 넘어갔다면 클립보드 기록도 지우십시오."
+    : "보내기·복사가 막혔습니다. 아래 «키 받기» 칸에 링크를 넣어두었으니 길게 눌러 복사하십시오.";
+  if (!done) el.keyRecvIn.value = link;
+};
+
+el.keyRecv.onclick = () => {
+  const s = el.keyRecvIn.value.trim();
+  if (!s){ el.keyMsg.textContent = "받은 링크를 위 칸에 붙여넣으십시오."; return; }
+  let keys = null;
+  try { keys = parseKeyLink(s); }
+  catch (e) { el.keyMsg.textContent = (e && e.message) || "키 링크를 읽지 못했습니다."; return; }
+  el.keyRecvIn.value = "";
+  if (importKeys(keys)) el.keyMsg.textContent = "키 " + Object.keys(keys).length + "개를 넣었습니다.";
+};
+
+window.addEventListener("hashchange", importFromHash);
 
 el.checkUpdate.onclick = async () => {
   el.verMsg.textContent = " 확인 중…";
@@ -1375,6 +1746,21 @@ showWelcome();
 if (!settings.apiKey){
   setStatus("API 키를 먼저 넣어주십시오");
   openSettings();
+}
+/* a key link (#import=…). Taken off the address bar at once; the question
+   waits until lesson.js has loaded, so a Cloud TTS key lands in its settings
+   object rather than being overwritten by it */
+if (/^#import=/.test(location.hash || "")){
+  const keyHash = location.hash;
+  try { history.replaceState(null, "", location.pathname + location.search); } catch (e) {}
+  const runImport = () => {
+    let keys = null;
+    try { keys = parseKeyLink(keyHash); }
+    catch (e) { alert((e && e.message) || "키 링크를 읽지 못했습니다."); return; }
+    importKeys(keys);
+  };
+  if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", runImport);
+  else setTimeout(runImport, 0);
 }
 if (!navigator.mediaDevices || !window.MediaRecorder){
   showError("이 브라우저는 녹음을 지원하지 않습니다. 크롬 또는 사파리 최신 버전에서 열어주십시오.");

@@ -43,6 +43,13 @@ const KEEP_LESSONS = 7;
 const MP3_DELAY_MS = 46;
 
 const SCRIPT_TIMEOUT_MS = 150000;   // writing the script is one long reasoning call
+/* Claude streams the same script; it is slower per token than Flash, so it gets
+   its own, longer deadline. 64k of the model's 128k output cap: twice Gemini's
+   32k, because Claude's thinking is counted inside the same cap. */
+const CLAUDE_SCRIPT_TIMEOUT_MS = 360000;
+const CLAUDE_SCRIPT_MAX_TOKENS = 64000;
+const CLAUDE_ASK_TIMEOUT_MS = 60000;
+const CLAUDE_ASK_MAX_TOKENS = 8000;
 
 const SLOW_RATE = 0.72;        // the one deliberately slow read of a whole sentence
 const SPEED_STEPS = [0.8, 1, 1.2];
@@ -571,6 +578,10 @@ async function lessonWriteScript(rows, cur){
      the old parts): the cap is set well above it, so a cut-off reply means
      something went wrong rather than that the lesson simply grew */
   const cfg = { temperature: 0.4, thinking_level: "medium", max_output_tokens: 32768 };
+  /* with a Claude key the script is written by Claude first (same prompt, same
+     body); a failed or unparseable Claude reply is redone by Gemini, and the
+     retry below then goes straight to Gemini */
+  const route = {};
 
   const replies = [];
   let lastErr = null;
@@ -578,20 +589,35 @@ async function lessonWriteScript(rows, cur){
     const nudge = attempt === 0 ? "" :
       "\n\nYour previous reply could not be parsed. Return ONLY the JSON object, starting " +
       "with { and ending with }. No fence, no text before it and none after it.";
+    const sys = LESSON_PROMPT + nudge;
+    const claudeTurn = !!settings.claudeKey && !(route.claudeFailed && settings.apiKey);
+    const limitMs = SCRIPT_TIMEOUT_MS + (claudeTurn ? CLAUDE_SCRIPT_TIMEOUT_MS : 0);
     try {
       /* callPlain has no deadline of its own, and this call holds the app's
          `busy` flag: without a cap, one stalled request would leave the
-         microphone and the typing box disabled until a reload */
+         microphone and the typing box disabled until a reload. A Claude turn
+         carries its own deadline and leaves Gemini its full one after it. */
       const reply = await Promise.race([
-        callPlain(LESSON_PROMPT + nudge, body, cfg),
+        viaClaude(sys, body, () => callPlain(sys, body, cfg), {
+          route: route,
+          maxTokens: CLAUDE_SCRIPT_MAX_TOKENS,
+          effort: "medium",
+          timeoutMs: CLAUDE_SCRIPT_TIMEOUT_MS,
+          validate: (t) => {
+            const j = lessonExtractJson(t);
+            if (!j || typeof j !== "object" || Array.isArray(j)) throw new Error("대본 형식이 올바르지 않습니다.");
+          },
+          onFallback: (note) => { try { lessonBusySub(note + " 대본을 쓰는 중…"); } catch (e) {} }
+        }),
         new Promise((_, rej) => setTimeout(
-          () => rej(new Error("대본 요청이 " + (SCRIPT_TIMEOUT_MS / 1000) + "초 안에 끝나지 않았습니다.")),
-          SCRIPT_TIMEOUT_MS))
+          () => rej(new Error("대본 요청이 " + (limitMs / 1000) + "초 안에 끝나지 않았습니다.")),
+          limitMs))
       ]);
       replies.push(String(reply || ""));
       return lessonNormalise(lessonExtractJson(reply), payload.map((p) => p.es), cur);
     } catch (e) {
       if (/API \d{3}/.test((e && e.message) || "")) throw e;   // key, quota, model: do not retry
+      if (e && e.claude) throw e;   // Claude failed with no Gemini key to hand it to: a second wait would fail the same way
       lastErr = e;
     }
   }
@@ -3228,7 +3254,9 @@ async function qaPersist(turns, tag){
 async function askAsk(pending){
   if (askBusy) return;                       // two taps, one question
   if (!current){ return; }
-  if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
+  /* a typed question can go to Claude alone; a spoken one needs Gemini */
+  const canAsk = settings.apiKey || (settings.claudeKey && !(pending && pending.audio));
+  if (!canAsk){ closeDlg($("lesson")); openSettings(); return; }
 
   /* the screen this answer belongs to, so a reply that lands after the user has
      closed the lesson or moved to another one is dropped instead of being filed
@@ -3255,12 +3283,29 @@ async function askAsk(pending){
          { type: "audio", data: askPending.audio.data, mime_type: askPending.audio.mime }]
       : [{ type: "text", text: askContextJson(askPending) }];
 
+    /* read now: askPending can be cleared while the answer is on its way */
+    const audioMs = askPending.audio ? askPending.audio.ms : 0;
+    const gemini = () => callPlain(ASK_PROMPT, input, { temperature: 0.35, thinking_level: "low" }, audioMs);
+    /* a typed question goes to Claude when there is a Claude key; a spoken one
+       always to Gemini, which is the one that can hear */
+    const claudeTurn = !askPending.audio && !!settings.claudeKey;
+    const limitMs = ASK_TIMEOUT_MS + (claudeTurn ? CLAUDE_ASK_TIMEOUT_MS : 0);
     const reply = await Promise.race([
-      callPlain(ASK_PROMPT, input, { temperature: 0.35, thinking_level: "low" },
-                askPending.audio ? askPending.audio.ms : 0),
+      claudeTurn
+        ? viaClaude(ASK_PROMPT, input[0].text, gemini, {
+            maxTokens: CLAUDE_ASK_MAX_TOKENS, effort: "low", timeoutMs: CLAUDE_ASK_TIMEOUT_MS,
+            /* the answer format is one JSON object; a reply without one is
+               a failure Gemini should redo, not prose to show as is */
+            validate: (t) => {
+              const j = lessonExtractJson(t);
+              if (!j || typeof j !== "object" || !Array.isArray(j.parts)) throw new Error("답 형식이 올바르지 않습니다.");
+            },
+            onFallback: (note) => { try { lessonNotice(note); } catch (e) {} }
+          })
+        : gemini(),
       new Promise((_, rej) => setTimeout(
-        () => rej(new Error("답이 " + (ASK_TIMEOUT_MS / 1000) + "초 안에 오지 않았습니다.")),
-        ASK_TIMEOUT_MS))
+        () => rej(new Error("답이 " + (limitMs / 1000) + "초 안에 오지 않았습니다.")),
+        limitMs))
     ]);
 
     /* the answer arrived, but the screen may have moved on while it was coming */
@@ -3304,6 +3349,18 @@ function askSend(){
   askAsk({ q: text, via: "text" });
 }
 
+/* No Gemini key, so nothing can hear a spoken question. With only a Claude key
+   that is said in the panel, instead of opening a settings screen that looks
+   as if nothing were set up. */
+function askNoVoiceKey(){
+  if (settings.claudeKey){
+    askVoiceError("음성 질문은 Gemini 키가 필요합니다. 글로 물어보시거나 설정에서 Gemini 키를 넣으십시오.",
+                  lessonAskTag());
+    return;
+  }
+  closeDlg($("lesson")); openSettings();
+}
+
 /* Borrows the interpreter's recorder: same auto-stop, same encoding, and only
    the destination differs. The destination is handed to startRecording so that
    it belongs to that one recording session (see recSession in app.js). */
@@ -3316,7 +3373,7 @@ async function askMic(){
   }
   if (askOccupied()) return;
   if (busy) return;
-  if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
+  if (!settings.apiKey){ askNoVoiceKey(); return; }
   if (player){ try { player.pause(); } catch (e) {} }
 
   askRecording = true;
@@ -3396,7 +3453,8 @@ async function openLesson(force){
       if (saved && saved.lesson){ mountLesson(saved); return; }
     }
 
-    if (!settings.apiKey){ closeDlg($("lesson")); openSettings(); return; }
+    /* the script can be written by Gemini or, with only that key, by Claude */
+    if (!settings.apiKey && !settings.claudeKey){ closeDlg($("lesson")); openSettings(); return; }
 
     /* no conversation today is no longer a reason to stop: the new words,
        the grammar step and the lo·le·se drill do not need one */
