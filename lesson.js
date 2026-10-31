@@ -41,6 +41,8 @@ const KEEP_LESSONS = 7;
    looks up currentTime - MP3_DELAY_MS, and every seek adds it back, so tapping
    a row still lands on that row rather than the one above it. */
 const MP3_DELAY_MS = 46;
+/* silence at the head of an mp3 lesson, for a Bluetooth link waking up */
+const LEAD_PAD_SEC = 0.4;
 
 const SCRIPT_TIMEOUT_MS = 150000;   // writing the script is one long reasoning call
 /* Claude streams the same script; it is slower per token than Flash, so it gets
@@ -69,6 +71,9 @@ const P = {
   outro: 0.4,
   quizThink: 3.0,              // 0교시: the Korean meaning, then time to say it yourself
   quizFollow: 2.0,             // after the Spanish answer, time to repeat it
+  guess: 2.0,                  // «맞혀 보세요»: the gap before the answer
+  oneEs: 0.9, oneMean: 0.5,    // 4교시, one word of a sentence
+  why: 0.6,
   section: 1.0                 // added on top, at a section boundary
 };
 
@@ -115,6 +120,21 @@ const LESSON_PROMPT = [
   "  new_words    — today's new words for the beginner, chosen by the app (may be empty).",
   "  grammar_step — today's grammar topic: title, core (what to teach), how (how to explain it).",
   "  pronoun_hits — today's Spanish lines where the app spotted lo/la/le/se/me/te (may be empty).",
+  "  recent       — what earlier lessons of the last few days already taught in full: idioms,",
+  "                 frames, words, sentences, pronoun lines (may be empty). The learner hears",
+  "                 the same kitchen every day; repeating yesterday is the main way a lesson",
+  "                 gets boring.",
+  "",
+  "AVOID REPEATS — use recent:",
+  "- idioms: never pick one listed in recent.idioms. Fewer idioms is fine.",
+  "- frames: prefer ones not in recent.frames. One that IS in today's sentences may stay, but",
+  "  then write new swaps, not the old ones.",
+  "- words: list the words not in recent.words first; a recent one only if it really matters",
+  "  today (the app reads a recent one once, briefly).",
+  "- pronoun: do not reuse a line from recent.pronoun in the quiz.",
+  "- sentences: prefer today's sentences that are not in recent.sentences.",
+  "- The time a recent item no longer takes goes to new ones: when much of today is in recent,",
+  "  give more NEW words (up to 14) and one more new sentence rather than recent ones.",
   "",
   "Return ONE JSON object and nothing else. No markdown, no code fence, no commentary.",
   "",
@@ -123,7 +143,8 @@ const LESSON_PROMPT = [
   '                 "times":[{"when":"지금","es":"","ko":""}],"en":"","en_say":""}],',
   '  "words":     [{"es":"","ko":"","note":"","en":"","en_say":""}],',
   '  "idioms":    [{"es":"","ko":"","from":"","note":"","en":"","en_say":""}],',
-  '  "sentences": [{"es":"","ko":"","chunks":[{"es":"","ko":"","note":"","en":"","en_say":"",',
+  '  "sentences": [{"es":"","ko":"","fun":"","words":[{"es":"","ko":"","why":"","tip":""}],',
+  '                 "chunks":[{"es":"","ko":"","note":"","en":"","en_say":"",',
   '                 "times":[{"when":"지금","es":"","ko":""}]}]}],',
   '  "frames":    [{"type":"frame","es":"","ko":"","note":"","en":"","en_say":"",',
   '                 "today":{"es":"","ko":""},"swaps":[{"es":"","ko":""}],',
@@ -189,12 +210,29 @@ const LESSON_PROMPT = [
   "  - from: the es of the word above that it branches from, exactly.",
   "  - note: one short Korean line on when it is used. Korean only — no Spanish inside it.",
   "",
-  "sentences — 3 to 5 sentences from today worth memorising, copied EXACTLY as they appear.",
+  "sentences — 2 to 4 sentences from today worth memorising, copied EXACTLY as they appear.",
   "  ko: the Korean meaning.",
+  "  words: EVERY word of the sentence, in order, articles and little words included (el, de,",
+  "    en, y, al, que …). A word that comes twice in the sentence is listed once. A pair that",
+  "    always goes together (por favor, a lo mejor) may be one item.",
+  "    es: the word exactly as written in the sentence, glued lo/la/se/me kept (mételo, dáselo).",
+  "    ko: its plain Korean meaning here, short.",
+  "    why: WHY it has this shape, in plain Korean a child could follow, at most 3 short",
+  "      sentences: the basic word it comes from (pon 은 poner(놓다)에서 왔어요), who / when /",
+  "      how many changed its ending (친구한테 시킬 때 / 이미 끝난 일이라서 / 여럿이라서),",
+  "      what a glued lo, la, se or me means (끝에 붙은 lo 는 ‘그것을’), why el or la",
+  "      (남자 쪽 말이라 el). A little word gets ONE sentence. Never just repeat ko.",
+  "    tip: OPTIONAL one short memory hook — a Korean sound-alike, a pun, a picture",
+  "      (pon → ‘폰 내려놓듯 놓아 줘’). Leave it empty when it would be forced. At most",
+  "      one tip in three words.",
+  "    For a word in recent.words, why is one short sentence.",
+  "  fun: OPTIONAL one short Korean line: how people in Mexico really use this sentence or a",
+  "    word in it — a nuance, a local way to say it. Only what you are sure of; else empty.",
   "  chunks: 2 to 5 pieces, in the order they appear in the Spanish, together covering the",
   "    sentence. Each chunk is a unit: a verb phrase, a set expression (an idiom inside the",
   "    sentence is its own chunk), a noun with its article, a question opener.",
-  "  chunks[].note: ONE short grammar line in Korean that a child could follow, about THIS chunk.",
+  "  chunks[].note: usually empty now that words explain each word; otherwise ONE short line",
+  "    in Korean that a child could follow, about THIS chunk.",
   "    Good: al + 동작을 나타내는 말 은 '~할 때' 라는 뜻이에요 /",
   "          pon 은 poner(놓다)로 '놓아 줘' 하고 부탁할 때 쓰는 모양이에요 /",
   "          pedí 는 이미 끝난 일을 말할 때 모양이에요",
@@ -459,6 +497,46 @@ function cleanPronoun(raw, sources, ban){
   return points.length || quiz.length ? { points: points, quiz: quiz } : null;
 }
 
+/* 4교시, word by word. Each word must really be in its sentence (a word the
+   model made up is never explained as if it had been said), the same word is
+   kept once, and an explanation is cut to WHY_MAX sentences so one word never
+   turns into a lecture. A why or tip that uses a banned grammar word in the
+   open is dropped; the word itself stays with its meaning. */
+const SENT_WORDS_MAX = 16, WHY_MAX = 3, WHY_CHARS = 170, TIP_CHARS = 70, FUN_CHARS = 100;
+function firstSentences(s, n, cap){
+  /* no look-behind here: an older iPhone Safari refuses the whole file over one */
+  const parts = (cleanStr(s).match(/[^.!?]+[.!?]*/g) || []).map((p) => p.trim()).filter(Boolean);
+  let out = "";
+  for (const p of parts.slice(0, n)){
+    if (out && (out + " " + p).length > cap) break;
+    out = out ? out + " " + p : p;
+  }
+  return out.length > cap ? "" : out;
+}
+function cleanSentWords(list, sentEs, ban){
+  const toks = esTokens([sentEs]);
+  const out = [], seen = new Set();
+  for (const x of (Array.isArray(list) ? list : [])){
+    const o = asObj(x);
+    const es = cleanStr(o && o.es).replace(/^[¿¡"«]+|[.,;:!?"»]+$/g, ""), ko = cleanStr(o && o.ko);
+    if (!es || !ko || /[가-힣]/.test(es) || ko.length > 40) continue;
+    const parts = foldEs(es).split(/[^a-z]+/).filter(Boolean);
+    if (!parts.length || !parts.every((t) => toks.has(t))) continue;
+    const k = parts.join(" ");
+    if (seen.has(k)) continue;
+    seen.add(k);
+    const tip = banScrub(o.tip, ban);
+    out.push({ es: es, ko: ko, why: firstSentences(banScrub(o.why, ban), WHY_MAX, WHY_CHARS),
+               tip: tip.length <= TIP_CHARS ? tip : "" });
+    if (out.length >= SENT_WORDS_MAX) break;
+  }
+  return out;
+}
+function cleanFun(v, ban){
+  const s = banScrub(v, ban);
+  return s && s.length <= FUN_CHARS && /[가-힣]/.test(s) ? s : "";
+}
+
 /* The reply was cut off: keep everything up to the last value that closed,
    and close what was still open. Only used once a retry has failed too. */
 function lessonSalvageJson(text){
@@ -527,6 +605,8 @@ function lessonNormalise(raw, sourceEs, cur){
   const sentences = (silent ? [] : Array.isArray(raw.sentences) ? raw.sentences : [])
     .map((s) => ({
       es: cleanStr(s && s.es), ko: cleanStr(s && s.ko),
+      words: cleanSentWords(s && s.words, cleanStr(s && s.es), ban),
+      fun: cleanFun(s && s.fun, ban),
       chunks: (Array.isArray(s && s.chunks) ? s.chunks : [])
         .map((c) => Object.assign({
           es: cleanStr(c && c.es), ko: cleanStr(c && c.ko), note: note(c && c.note),
@@ -572,7 +652,8 @@ async function lessonWriteScript(rows, cur){
     today: payload,
     new_words: cur ? cur.newWords : [],
     grammar_step: step ? { title: step.title, core: step.core, how: step.how } : null,
-    pronoun_hits: cur ? cur.pronounHits : []
+    pronoun_hits: cur ? cur.pronounHits : [],
+    recent: cur && cur.recentList ? cur.recentList : undefined
   });
   /* the reply is long now (ten new words, a grammar part, a drill on top of
      the old parts): the cap is set well above it, so a cut-off reply means
@@ -758,6 +839,78 @@ function newWordsReview(iso){
   }
   if (best) for (const x of turn(byDay.get(best), NEW_REVIEW_WEEK)) out.push(Object.assign(x, { when: "week" }));
   return out;
+}
+
+/* ---- what was already taught, and when ----
+   A week of the same kitchen sounds alike: measured on seven mock days, 70% of
+   the lesson's time went to things taught in the last week (2026-10-31). So
+   every item a lesson teaches IN FULL is written here once the lesson is saved,
+   keyed by part and plain Spanish. Inside KNOWN_DAYS it is «아는 것»: said once,
+   no repeats, no long note, and it is left out of 마무리. A short mention does
+   not reset the clock, so an item comes back in full after KNOWN_DAYS.
+   t: v 대화 단어 · i 숙어 · s 문장 · w 문장 속 낱말 · f 뼈대 · p lo·le·se */
+const TAUGHT_KEY = "interp.taught";        // { items: { "<t>:<key>": { d, p, n, es } } }
+const KNOWN_DAYS = 5;
+const TAUGHT_KEEP = 600;
+/* how much of it goes into the script request, per part (the request grows) */
+const RECENT_CAP = { i: 12, f: 12, v: 20, s: 6, p: 8 };
+const RECENT_FIELD = { i: "idioms", f: "frames", v: "words", s: "sentences", p: "pronoun" };
+
+const taughtId = (t, es) => t + ":" + reviewKey(String(es || "").replace(/\s*…$/, ""));
+
+function taughtAll(){
+  const s = asObj(jget(TAUGHT_KEY, null));
+  const src = asObj(s && s.items) || {};
+  const out = {};
+  const day = (v) => typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v);
+  for (const k of Object.keys(src)){
+    const e = asObj(src[k]);
+    if (e && day(e.d)) out[k] = { d: e.d, p: day(e.p) ? e.p : "", n: Number(e.n) > 0 ? Number(e.n) : 1,
+                                  es: cleanStr(e.es).slice(0, 80) };
+  }
+  return out;
+}
+/* the last day BEFORE `iso` it was taught in full: a 다시 만들기 on the same day
+   must see the same «known» set as the first make did */
+function taughtBefore(e, iso){
+  if (e.d < iso) return e.d;
+  return e.p && e.p < iso ? e.p : "";
+}
+function taughtRecent(iso){
+  const cut = isoAddDays(iso, -KNOWN_DAYS), all = taughtAll(), out = {};
+  for (const k of Object.keys(all)){
+    const d = taughtBefore(all[k], iso);
+    if (d && d >= cut) out[k] = { d: d, n: all[k].n, es: all[k].es };
+  }
+  return out;
+}
+/* the same, as short lists for the script request — newest first, capped */
+function taughtRecentList(recent){
+  const out = {};
+  for (const t of Object.keys(RECENT_FIELD)) out[RECENT_FIELD[t]] = [];
+  const keys = Object.keys(recent || {}).sort((a, b) => recent[b].d.localeCompare(recent[a].d) || a.localeCompare(b));
+  for (const k of keys){
+    const t = k.split(":")[0], f = RECENT_FIELD[t];
+    if (!f || !recent[k].es || out[f].length >= RECENT_CAP[t]) continue;
+    out[f].push(recent[k].es);
+  }
+  return out;
+}
+function taughtCommit(iso, list){
+  const all = taughtAll(), next = {};
+  for (const k of Object.keys(all)) next[k] = all[k];
+  for (const x of (Array.isArray(list) ? list : [])){
+    if (!x || !x.t || !cleanStr(x.es)) continue;
+    const k = taughtId(x.t, x.es);
+    if (k.length < 3) continue;
+    const e = next[k];
+    if (!e) next[k] = { d: iso, p: "", n: 1, es: cleanStr(x.es).slice(0, 80) };
+    else if (e.d !== iso && e.d < iso) next[k] = { d: iso, p: e.d, n: e.n + 1, es: e.es || cleanStr(x.es).slice(0, 80) };
+  }
+  const keep = Object.keys(next).sort((a, b) => next[b].d.localeCompare(next[a].d)).slice(0, TAUGHT_KEEP);
+  const items = {};
+  for (const k of keep) items[k] = next[k];
+  jset(TAUGHT_KEY, { items: items });
 }
 
 /* ---- the grammar course: one step a day, in this order ----
@@ -984,16 +1137,26 @@ const PRON_QUIZ_LEAD = "퀴즈 세 개예요. 한국어를 듣고, 3초 안에 �
 
 /* What the drill teaches today: Gemini's points and quiz where it wrote
    them, the base set filling whatever is missing. Never empty. */
-function pronounPlan(p, iso){
+function pronounPlan(p, iso, recent){
   const L = PRON_BASE.length;
   const start = ((dayNum(iso) * 5) % L + L) % L;          // a different few each day
-  const points = p && p.points ? p.points.slice(0, 3) : [];
-  const quiz = p && p.quiz ? p.quiz.slice(0, PRON_QUIZ) : [];
+  /* a line drilled in the last few days gives way to one not heard lately —
+     the same «y mételo al refri» every morning teaches nothing new */
+  const fresh = (x) => !(recent && recent[taughtId("p", x.es)]);
+  const points = p && p.points ? p.points.filter(fresh).slice(0, 3) : [];
+  const quiz = p && p.quiz ? p.quiz.filter(fresh).slice(0, PRON_QUIZ) : [];
   const used = new Set(points.concat(quiz).map((x) => foldEs(x.es)));
   const spare = [];
   for (let i = 0; i < L; i++){
     const b = PRON_BASE[(start + i) % L];
-    if (!used.has(foldEs(b.es))) spare.push(b);
+    if (!used.has(foldEs(b.es)) && fresh(b)) spare.push(b);
+  }
+  /* everything was drilled lately: the base set still fills, in its turn */
+  if (spare.length < PRON_POINTS + PRON_QUIZ){
+    for (let i = 0; i < L; i++){
+      const b = PRON_BASE[(start + i) % L];
+      if (!used.has(foldEs(b.es)) && spare.indexOf(b) < 0) spare.push(b);
+    }
   }
   if (!points.length) for (const b of spare.splice(0, PRON_POINTS)) points.push(Object.assign({ today: false }, b));
   while (quiz.length < PRON_QUIZ && spare.length){
@@ -1006,13 +1169,16 @@ function pronounPlan(p, iso){
 /* Everything the day's course needs, read before the script is written. */
 function curriculumPlan(sourceEs, iso){
   const pick = newWordsPick(iso, sourceEs);
+  const recent = taughtRecent(iso);
   return {
     iso: iso,
     newWords: pick.words, wordsAgain: pick.again, oldWords: pick.oldWords,
     learnedBefore: pick.learnedBefore,
     wordReview: newWordsReview(iso),
     grammar: grammarPick(iso),
-    pronounHits: pronounHits(sourceEs)
+    pronounHits: pronounHits(sourceEs),
+    recent: recent,
+    recentList: taughtRecentList(recent)
   };
 }
 
@@ -1031,6 +1197,7 @@ function curriculumCommit(lesson){
     const g = grammarState();
     if (!(g.last && g.last.date === c.iso)) jset(GRAMMAR_KEY, { n: c.grammar.k + 1, last: { date: c.iso, k: c.grammar.k } });
   }
+  if (Array.isArray(c.taught)) taughtCommit(c.iso, c.taught);
 }
 
 /* ---------------- 0교시 — yesterday's review ----------------
@@ -1172,12 +1339,42 @@ function reviewPlan(prev, iso){
            items: take, estMs: ms };
 }
 
+/* ---- so the same words are not said the same way every day ----
+   A short turn into each part, and a few ways of saying «next», picked by the
+   day and the place: the same lesson always comes out the same, two days do
+   not. The first item of a part keeps its plain «첫 번째». */
+const TURN = {
+  words: ["이제 오늘 대화에서 나온 단어예요.", "자, 오늘 주방에서 들린 단어들이에요.",
+          "오늘 대화 속 단어로 넘어갈게요.", "귀를 열고, 오늘 대화 단어 갑니다."],
+  sents: ["이제 문장을 낱말 하나하나 뜯어볼 시간이에요. 왜 이런 모양인지 같이 볼게요.",
+          "문장 해부 시간이에요. 낱말마다 다 사연이 있어요.",
+          "오늘 문장을 돋보기로 들여다볼게요. 낱말 하나씩이에요.",
+          "이번엔 문장 속 낱말이 왜 그 모양인지 하나씩 풀어 볼게요."],
+  frames: ["말의 뼈대예요. 이것만 잡으면 문장이 술술 나와요.", "이제 말의 뼈대예요. 틀은 두고 안만 바꿔 끼우면 돼요.",
+           "뼈대 시간이에요. 문장을 잇는 접착제 같은 말들이에요."],
+  review: ["마무리로 오늘 새로 배운 것만 빠르게 한 번씩 훑을게요.", "끝으로 오늘 것만 한 번씩 빠르게 들을게요.",
+           "마지막 한 바퀴, 오늘 새로 배운 것만이에요."]
+};
+const NEXT_SAY = ["다음, ", "이번엔 ", "그다음은 ", ""];
+const SENT_SAY = ["다음 문장이에요.", "자, 이번 문장이에요.", "또 하나 갈게요.", "이어서 이 문장이에요."];
+const GUESS_SAY = ["맞혀 보세요. 이 말은 무슨 뜻일까요?", "퀴즈 하나. 이건 무슨 뜻일까요?", "잠깐, 이 말 뜻을 먼저 떠올려 보세요."];
+const ANSWER_SAY = ["정답은, ", "답은, ", "맞혀 보셨나요? "];
+const FUN_SAY = ["멕시코 이야기 하나. ", "현지 꿀팁 하나. ", "알아 두면 재미있는 것. "];
+const TIP_SAY = ["기억 요령. ", "외우는 방법. ", "이렇게 외워요. "];
+const KNOWN_SAY = {
+  words: ["최근에 배운 단어는 한 번씩만 들을게요.", "이건 요 며칠 배운 단어예요. 한 번씩만 갈게요."],
+  idioms: ["이건 최근에 배운 숙어예요. 한 번만 들을게요.", "요 며칠 배운 숙어, 한 번씩만요."]
+};
+const pickSay = (pool, n) => pool[((n % pool.length) + pool.length) % pool.length];
+const LESSON_MAX_MS = 25 * 60000;   // over this, the repeats are cut back (lessonBuild)
+
 /* The content becomes a flat segment list (what gets spoken) plus display rows
    (what gets shown). A three-times repeat is several segments inside one row.
    `prev`, when given, is the saved lesson before this one: 0교시 reviews it.
    `cur`, when given, is the day's course plan (curriculumPlan): the new words
    to review in 0교시, and the grammar step 5교시 teaches. */
-function lessonBuild(content, when, prev, cur){
+function lessonBuild(content, when, prev, cur, trim){
+  trim = trim || 0;
   const segs = [], rows = [];
   let sid = 0, gid = 0;
 
@@ -1243,6 +1440,22 @@ function lessonBuild(content, when, prev, cur){
   /* something 0교시 just reviewed is said once today, not three times */
   const reviewed = new Set(plan ? plan.items.map((it) => it.key) : []);
   const again = (es) => reviewed.size > 0 && reviewed.has(reviewKey(String(es || "").replace(/\s*…$/, "")));
+  /* taught in full on one of the last KNOWN_DAYS days (taughtRecent): once,
+     short. What is taught in full today goes into `taught` for curriculumCommit. */
+  const recent = cur && asObj(cur.recent) ? cur.recent : null;
+  const knownT = (t, es) => !!(recent && recent[taughtId(t, es)]);
+  const taught = [];
+  const teach = (t, es) => { if (cleanStr(es)) taught.push({ t: t, es: cleanStr(es).replace(/\s*…$/, "") }); };
+  const dn = dayNum(iso);
+  /* trim 1: words twice, not three times; trim 2: also no memory hooks and one
+     sentence of why — only when the lesson ran past LESSON_MAX_MS */
+  const reps = trim ? 2 : 3;
+  const turnRow = (sec, key) => {
+    const t = pickSay(TURN[key], dn);
+    const gg = row(sec, "say", { ko: t });
+    seg(sec, gg, "ko", t, P.lead);
+  };
+  const nextLead = (i) => (i === 0 ? ordKo(1) + ". " : pickSay(NEXT_SAY.concat([ordKo(i + 1) + ". "]), dn + i));
 
   /* intro */
   const parts = [];
@@ -1320,40 +1533,122 @@ function lessonBuild(content, when, prev, cur){
     });
   }
 
-  /* 2교시 — each word three times */
-  content.words.forEach((w, i) => {
-    const lead = ordKo(i + 1) + ". " + w.ko + "." + (w.note ? " " + w.note : "");
+  /* «아는 것»: a cue, then each one once — Spanish, Korean, nothing more */
+  function knownGroup(sec, key, list){
+    if (!list.length) return;
+    const cue = pickSay(KNOWN_SAY[key], dn);
+    g = row(sec, "say", { ko: cue });
+    seg(sec, g, "ko", cue, P.lead);
+    for (const x of list){
+      g = row(sec, "pair", { es: x.es, ko: x.ko, badge: "아는 것", from: x.from || undefined });
+      seg(sec, g, "es", x.es, P.reviewEs);
+      seg(sec, g, "ko", plain(x.ko), P.reviewKo);
+    }
+  }
+
+  /* 2교시 — each word three times; one taught in the last few days, once */
+  const wordsNew = content.words.filter((w) => again(w.es) || !knownT("v", w.es));
+  const wordsKnown = content.words.filter((w) => !again(w.es) && knownT("v", w.es));
+  if (wordsNew.length && (NW || plan || wordQuiz.length)) turnRow(SEC.words, "words");
+  wordsNew.forEach((w, i) => {
+    const lead = nextLead(i) + w.ko + "." + (w.note ? " " + w.note : "");
     g = row(SEC.words, "lead", { ko: lead });
     seg(SEC.words, g, "ko", lead, P.lead);
 
-    const n = again(w.es) ? 1 : 3;
-    g = row(SEC.words, "pair", { es: w.es, ko: w.ko, badge: n === 1 ? "어제 복습" : "×3" });
+    const n = again(w.es) ? 1 : reps;
+    g = row(SEC.words, "pair", { es: w.es, ko: w.ko, badge: n === 1 ? "어제 복습" : "×" + n });
     for (let k = 0; k < n; k++){
       seg(SEC.words, g, "es", w.es, P.wordEs);
       seg(SEC.words, g, "ko", w.ko, k === n - 1 ? P.wordKoLast : P.wordKo);
     }
     enLine(SEC.words, w);
+    if (n > 1) teach("v", w.es);
   });
+  knownGroup(SEC.words, "words", wordsKnown);
 
   /* 2교시 — expressions branching off those words */
-  content.idioms.forEach((x, i) => {
+  const idiomsNew = content.idioms.filter((x) => again(x.es) || !knownT("i", x.es));
+  const idiomsKnown = content.idioms.filter((x) => !again(x.es) && knownT("i", x.es));
+  idiomsNew.forEach((x, i) => {
     const lead = "보너스 " + ordKo(i + 1) + ". " + x.ko + "." + (x.note ? " " + x.note : "");
     g = row(SEC.idioms, "lead", { ko: lead, from: x.from });
     seg(SEC.idioms, g, "ko", lead, P.lead);
 
-    const n = again(x.es) ? 1 : 3;
-    g = row(SEC.idioms, "pair", { es: x.es, ko: x.ko, badge: n === 1 ? "어제 복습" : "×3", from: x.from });
+    const n = again(x.es) ? 1 : reps;
+    g = row(SEC.idioms, "pair", { es: x.es, ko: x.ko, badge: n === 1 ? "어제 복습" : "×" + n, from: x.from });
     for (let k = 0; k < n; k++){
       seg(SEC.idioms, g, "es", x.es, P.wordEs);
       seg(SEC.idioms, g, "ko", x.ko, k === n - 1 ? P.wordKoLast : P.wordKo);
     }
-    if (n === 3) enLine(SEC.idioms, x);
+    if (n > 1){ enLine(SEC.idioms, x); teach("i", x.es); }
   });
+  knownGroup(SEC.idioms, "idioms", idiomsKnown);
 
-  /* 3교시 — a sentence taken apart, then put back together */
+  /* 4교시 — word by word: what each word means, why it has this shape, a way to
+     remember it. A word already explained earlier in this lesson is skipped; one
+     explained on a recent day, or taught in 2교시 today, is said short. Every so
+     often one word is a «맞혀 보세요» with a gap before the answer. */
+  const talkedV = new Set(content.words.map((w) => foldEs(w.es)));
+  const wordsSeen = new Set();
+  const isSmall = (w) => !w.tip && foldEs(w.es).length <= 3;
+  function sentWords(s, i, short){
+    let guessed = false;
+    let shown = 0;
+    for (const w of s.words){
+      const fk = foldEs(w.es);
+      if (wordsSeen.has(fk)) continue;
+      const recentW = knownT("w", w.es);
+      if (short && (recentW || shown >= 2)) continue;     // a sentence seen before: the new bits only
+      wordsSeen.add(fk);
+      shown++;
+      const brief = recentW || (short && !w.why);
+      const why = brief ? "" : (talkedV.has(fk) || short || trim > 1) ? firstSentences(w.why, 1, WHY_CHARS) : w.why;
+      const tip = brief || trim > 1 || short ? "" : w.tip;
+      /* the quiz: on every other sentence, the first word worth guessing */
+      const guess = !guessed && !short && !brief && i % 2 === 0 && !isSmall(w) && !!why;
+      if (guess){
+        guessed = true;
+        const q = pickSay(GUESS_SAY, dn + i);
+        g = row(SEC.sents, "say", { ko: "🤔 " + q });
+        seg(SEC.sents, g, "ko", q, P.lead);
+        seg(SEC.sents, g, "es", w.es, P.guess);
+      }
+      g = row(SEC.sents, "pair", { es: w.es, ko: w.ko, badge: brief ? "아는 단어" : "단어" });
+      if (guess) seg(SEC.sents, g, "ko", pickSay(ANSWER_SAY, dn + i) + plain(w.ko) + ".", P.oneMean);
+      else {
+        seg(SEC.sents, g, "es", w.es, P.oneEs);
+        seg(SEC.sents, g, "ko", plain(w.ko), brief ? P.reviewKo : P.oneMean);
+      }
+      if (why){
+        g = row(SEC.sents, "note", { ko: why });
+        seg(SEC.sents, g, "ko", plain(why), P.why);
+      }
+      if (tip){
+        g = row(SEC.sents, "note", { ko: "💡 " + tip });
+        seg(SEC.sents, g, "ko", pickSay(TIP_SAY, dn + i + shown) + plain(tip), P.why);
+      }
+      if (why) teach("w", w.es);
+    }
+  }
+
   content.sentences.forEach((s, i) => {
-    const lead = ordKo(i + 1) + " 문장입니다.";
-    g = row(SEC.sents, "lead", { ko: lead });
+    const words = Array.isArray(s.words) ? s.words : [];
+    /* seen on a recent day, or quizzed in 0교시 a few minutes ago: the core only */
+    /* quizzed in 0교시 a few minutes ago: once more as a whole, and on */
+    if (again(s.es)){
+      const l0 = "아까 복습한 문장이에요. 한 번 더 들어 볼게요.";
+      g = row(SEC.sents, "lead", { ko: l0, badge: "어제 복습" });
+      seg(SEC.sents, g, "ko", l0, P.sentLead);
+      g = row(SEC.sents, "full", { es: s.es, ko: s.ko });
+      seg(SEC.sents, g, "es", s.es, P.sentMean);
+      seg(SEC.sents, g, "ko", s.ko, P.sentMean);
+      return;
+    }
+    const short = knownT("s", s.es);
+    const lead = short ? "지난번에 본 문장이에요. 핵심만 짚을게요."
+      : i === 0 ? ordKo(1) + " 문장입니다." : pickSay(SENT_SAY.concat([ordKo(i + 1) + " 문장입니다."]), dn + i);
+    if (i === 0 && words.length && !short) turnRow(SEC.sents, "sents");
+    g = row(SEC.sents, "lead", short ? { ko: lead, badge: "지난번 문장" } : { ko: lead });
     seg(SEC.sents, g, "ko", lead, P.sentLead);
 
     g = row(SEC.sents, "slow", { es: s.es, badge: "느리게" });
@@ -1361,6 +1656,32 @@ function lessonBuild(content, when, prev, cur){
 
     g = row(SEC.sents, "say", { ko: s.ko });
     seg(SEC.sents, g, "ko", s.ko, P.sentMean);
+
+    if (words.length){
+      sentWords(s, i, short);
+      /* the verb tables of its chunks stay: now / already / going-to side by side */
+      if (!short) for (const c of s.chunks){
+        if (c.times && c.times.length){
+          tableRow(SEC.sents, "지금 · 이미 · 앞으로",
+            "지금, 이미 끝난 일, 앞으로 할 일로 나란히 들어 볼게요.", c.times);
+        }
+      }
+      if (s.fun && !short){
+        g = row(SEC.sents, "say", { ko: "🇲🇽 " + s.fun });
+        seg(SEC.sents, g, "ko", pickSay(FUN_SAY, dn + i) + plain(s.fun), P.note);
+      }
+      g = row(SEC.sents, "full", { es: s.es, ko: s.ko, badge: short ? "" : "×2" });
+      seg(SEC.sents, g, "es", s.es, P.full);
+      if (!short) seg(SEC.sents, g, "es", s.es, P.full);
+      if (!short) teach("s", s.es);
+      return;
+    }
+    if (short){
+      g = row(SEC.sents, "full", { es: s.es, ko: s.ko });
+      seg(SEC.sents, g, "es", s.es, P.full);
+      return;
+    }
+    teach("s", s.es);
 
     s.chunks.forEach((c) => {
       if (c.note){
@@ -1431,7 +1752,8 @@ function lessonBuild(content, when, prev, cur){
      they carry one, else the base set; who gets it, what is given; three
      quiz lines. */
   {
-    const pp = pronounPlan(content.pronoun, iso);
+    const pp = pronounPlan(content.pronoun, iso, recent);
+    for (const x of pp.points.concat(pp.quiz)) teach("p", x.es);
     g = row(SEC.pron, "say", { ko: PRON_LEAD });
     seg(SEC.pron, g, "ko", PRON_LEAD, P.lead);
     for (const p of pp.points){
@@ -1452,13 +1774,17 @@ function lessonBuild(content, when, prev, cur){
   /* 7교시 — the bones of speaking: what glues sentences, and the openings you
      keep while swapping the verb. Meaning, today's real use, swapped examples,
      then the same frame for each person. */
+  if (frames.length && frames.some((f) => !again(f.es) && !knownT("f", f.es))) turnRow(SEC.frames, "frames");
   frames.forEach((f, i) => {
-    /* reviewed in 0교시 a few minutes ago: once, short, and today's real use only */
-    if (again(f.es)){
-      const lead = ordKo(i + 1) + " 뼈대. " + f.ko + ". 아까 어제 복습에서 했던 틀이에요.";
+    /* reviewed in 0교시 a few minutes ago, or taught on a recent day: once,
+       short, and today's real use only */
+    const was = again(f.es);
+    if (was || knownT("f", f.es)){
+      const lead = ordKo(i + 1) + " 뼈대. " + f.ko + ". " +
+        (was ? "아까 어제 복습에서 했던 틀이에요." : "최근에 배운 틀이에요.");
       g = row(SEC.frames, "lead", { ko: lead });
       seg(SEC.frames, g, "ko", sayKo(lead), P.lead);
-      g = row(SEC.frames, "pair", { es: f.type === "link" ? f.es : f.es + " …", ko: f.ko, badge: "어제 복습" });
+      g = row(SEC.frames, "pair", { es: f.type === "link" ? f.es : f.es + " …", ko: f.ko, badge: was ? "어제 복습" : "아는 것" });
       seg(SEC.frames, g, "es", f.es, P.frameEs);
       seg(SEC.frames, g, "ko", sayKo(f.ko), P.frameKo);
       if (f.today){
@@ -1474,6 +1800,7 @@ function lessonBuild(content, when, prev, cur){
     g = row(SEC.frames, "lead", { ko: lead });
     seg(SEC.frames, g, "ko", sayKo(lead), P.lead);
 
+    teach("f", f.es);
     g = row(SEC.frames, "pair", { es: f.type === "link" ? f.es : f.es + " …", ko: f.ko, badge: "×2" });
     seg(SEC.frames, g, "es", f.es, P.frameEs);
     seg(SEC.frames, g, "ko", sayKo(f.ko), P.frameKo);
@@ -1498,18 +1825,25 @@ function lessonBuild(content, when, prev, cur){
     }
   });
 
-  /* 마무리 — every new word and every word once more, quickly, then every frame */
+  /* 마무리 — every new word and every word once more, quickly, then every frame.
+     Only what was taught in full today: a «아는 것» was just said once already. */
+  const fullToday = new Set(taught.map((x) => x.t + ":" + reviewKey(x.es)));
+  const inReview = (t, es) => !recent || again(es) ||
+    fullToday.has(t + ":" + reviewKey(String(es).replace(/\s*…$/, "")));
+  const revWords = content.words.filter((w) => inReview("v", w.es));
+  const revFrames = frames.filter((f) => inReview("f", f.es));
+  if (recent && newWords.length + revWords.length + revFrames.length) turnRow(SEC.review, "review");
   newWords.forEach((w) => {
     g = row(SEC.review, "pair", { es: w.es, ko: w.ko });
     seg(SEC.review, g, "es", w.es, P.reviewEs);
     seg(SEC.review, g, "ko", plain(w.ko), P.reviewKo);
   });
-  content.words.forEach((w) => {
+  revWords.forEach((w) => {
     g = row(SEC.review, "pair", { es: w.es, ko: w.ko });
     seg(SEC.review, g, "es", w.es, P.reviewEs);
     seg(SEC.review, g, "ko", w.ko, P.reviewKo);
   });
-  frames.forEach((f) => {
+  revFrames.forEach((f) => {
     g = row(SEC.review, "pair", { es: f.type === "link" ? f.es : f.es + " …", ko: f.ko });
     seg(SEC.review, g, "es", f.es, P.reviewEs);
     seg(SEC.review, g, "ko", sayKo(f.ko), P.reviewKo);
@@ -1531,8 +1865,16 @@ function lessonBuild(content, when, prev, cur){
   const course = cur ? {
     iso: iso,
     newWords: newWords.map((w) => ({ es: w.es, ko: w.ko })),
-    grammar: G ? { k: G.k, idx: G.idx } : null
+    grammar: G ? { k: G.k, idx: G.idx } : null,
+    taught: taught
   } : null;
+
+  /* a lesson that ran long is built again with fewer repeats (see `reps`) —
+     the length is the same estimate the device player draws its bar with */
+  if (trim < 2){
+    const ms = segs.reduce((n, s) => n + estimateMs(s) + s.pauseAfter * 1000, 0);
+    if (ms > LESSON_MAX_MS) return lessonBuild(content, when, prev, cur, trim + 1);
+  }
 
   return Object.assign({
     date: iso, dateLabel: dateLabel,
@@ -1558,7 +1900,8 @@ function lessonBuild(content, when, prev, cur){
    counts it exactly the way the encoder did. */
 function lessonTimeline(lesson, sr){
   const segs = lesson.segments;
-  let t = 0;
+  /* an mp3 lesson starts with LEAD_PAD_SEC of silence; device mode has none */
+  let t = sr && lesson.padMs > 0 ? lesson.padMs : 0;
   for (const s of segs){
     s.start = t;
     t += (s.audioMs || 0);
@@ -2018,6 +2361,12 @@ async function lessonSynthesize(lesson, onProgress, onPhase){
     return silences.get(n);
   }
 
+  /* a breath of silence before the first word: a Bluetooth car kit wakes its
+     music link only when sound starts, and swallows the first few hundred ms.
+     The timeline starts after it (lesson.padMs), so the highlight still fits. */
+  const pad = silence(LEAD_PAD_SEC);
+  out.write(pad);
+
   const segs = lesson.segments;
   for (let i = 0; i < segs.length; i++){
     const s = segs[i];
@@ -2033,6 +2382,7 @@ async function lessonSynthesize(lesson, onProgress, onPhase){
     if (s.pauseAfter > 0 && i < segs.length - 1) out.write(silence(s.pauseAfter));
   }
 
+  lesson.padMs = pad.length / sr * 1000;
   lessonTimeline(lesson, sr);
   lesson.sampleRate = sr;
   lesson.chars = jobs.reduce((n, p) => n + p[1].text.length, 0);
@@ -2244,6 +2594,9 @@ function audioPlayer(lesson, blob, onTick){
   return {
     kind: "audio",
     play: () => {
+      /* media, not a call: no microphone or capture AudioContext left open
+         while the lesson plays (see ensureStream in app.js) */
+      if (typeof audioForPlayback === "function") audioForPlayback();
       a.play().catch((e) => {
         showError("재생이 막혔습니다. 화면을 한 번 누른 뒤 다시 시도하십시오.\n" + ((e && e.message) || ""));
       });
@@ -2466,6 +2819,7 @@ function devicePlayer(lesson, onTick){
       /* after the last line idx sits past the end; without this, ▶ would look
          broken until the user tapped a row */
       if (idx >= lesson.segments.length) idx = 0;
+      if (typeof audioForPlayback === "function") audioForPlayback();
       running = true;
       speakOne();
     },
@@ -2610,7 +2964,10 @@ function renderTransport(){
         'aria-label="무한 반복" aria-pressed="' + lessonLoop + '">&#128257;</button>' +
     "</div>" +
     (isDev ? '<div class="L-warn">기기 음성으로 읽습니다. 화면을 끄거나 다른 앱으로 넘어가면 멈춥니다. ' +
-             "끊기지 않게 들으시려면 설정에서 Cloud TTS 키를 넣으십시오.</div>" : "");
+             "차 블루투스에서는 줄마다 소리가 끊겼다 이어져 앞부분이 잘리거나 안 나올 수 있습니다 — " +
+             "차에서는 고품질 음성(mp3)으로 들으십시오. " +
+             (lset.ttsKey ? "아래 «🎵 고품질 음성으로 바꾸기» 를 누르면 대본은 그대로 두고 음성만 만듭니다."
+                          : "설정에서 Cloud TTS 키를 넣으십시오.") + "</div>" : "");
 
   $("lPlay").onclick = () => { if (player) player.toggle(); };
   $("lBack").onclick = () => { if (player) player.step(-1); };
@@ -2650,6 +3007,15 @@ function renderFoot(){
     '<span class="L-meta" id="lMeta"></span>';
   $("lExport").onclick = exportLesson;
   $("lPastBtn").onclick = showPast;
+  if (!current.blob && lset.ttsKey){
+    const b = document.createElement("button");
+    b.className = "mini";
+    b.id = "lToMp3";
+    b.type = "button";
+    b.textContent = "🎵 고품질 음성으로 바꾸기";
+    b.onclick = () => { lessonToMp3().catch((e) => lessonNotice((e && e.message) || String(e))); };
+    $("lFoot").insertBefore(b, $("lFoot").firstChild);
+  }
   if (isToday) $("lRedo").onclick = () => {
     const warn = "오늘 수업을 새로 만듭니다.\n대화가 더 쌓였거나 음성 설정을 바꿨을 때 쓰십시오.\n\n" +
       (current.blob ? "지금 저장된 오디오는 지워지고 되돌릴 수 없습니다.\n" : "") +
@@ -3584,6 +3950,7 @@ async function makeLessonRun(rows){
            device voice rather than throwing all of it away */
         fellBack = (e && e.message) ? String(e.message) : String(e);
         lesson.segments.forEach((s) => { delete s.audioMs; });
+        delete lesson.padMs;
       }
       if (lessonCancelled) throw new Error("__cancelled__");
     }
@@ -3649,6 +4016,52 @@ async function makeLessonRun(rows){
     }
   } finally {
     busy = false;
+  }
+}
+
+/* A lesson read by the device voice, turned into one mp3 with the Cloud voice:
+   the script is kept as it is (no new script call), only the audio is made.
+   One continuous file is what a car's Bluetooth plays properly — the device
+   voice starts and stops at every line, and the car clips each start. */
+async function lessonToMp3(){
+  if (!current || current.blob || !lset.ttsKey) return;
+  if (busy || lessonMaking || recording){ lessonNotice("아직 하던 일이 끝나지 않았습니다."); return; }
+  if (!confirm("이 수업을 고품질 음성(mp3)으로 만듭니다. 대본은 그대로이고, 음성 요금만 듭니다. 계속할까요?")) return;
+  const mine = current;
+  const lesson = JSON.parse(JSON.stringify(mine.lesson));
+  lessonMaking = true;
+  busy = true;
+  lessonCancelled = false;
+  stopPlayer();
+  try {
+    lessonMessage("음성을 만드는 중…", "0 / ?");
+    $("lFoot").innerHTML = '<button class="mini" id="lCancel" type="button">그만두기</button>';
+    $("lCancel").onclick = () => { lessonCancelled = true; cancelTts(); lessonBusySub("그만두는 중…"); };
+    let blob = null, err = null;
+    try {
+      blob = await lessonSynthesize(lesson, (n, m) => lessonBusySub(n + " / " + m),
+                                    () => lessonBusySub("오디오를 합치는 중…"));
+    } catch (e) { err = e; }
+    /* the saved record is the one this screen showed, or nothing is written */
+    const saved = await lessonLoad(mine.date).catch(() => null);
+    const same = saved && String(saved.createdAt || "") === String(mine.createdAt || "");
+    if (!blob || !same){
+      const back = saved && saved.lesson ? saved : { date: mine.date, createdAt: mine.createdAt, engine: "device",
+                                                    lesson: mine.lesson, mp3: null, qa: mine.qa };
+      const why = lessonCancelled || (err && err.message === "__cancelled__") ? "" :
+        !same && saved ? "그사이 수업이 바뀌어 음성을 저장하지 않았습니다." :
+        "고품질 음성을 만들지 못했습니다.\n" + ((err && err.message) || "");
+      mountLesson(back, why);
+      return;
+    }
+    const rec = Object.assign({}, saved, { engine: "cloud", lesson: lesson, mp3: blob });
+    let note = "";
+    try { await lessonSave(rec); }
+    catch (e) { note = "음성을 기기에 저장하지 못했습니다. 지금은 들으실 수 있습니다."; }
+    mountLesson(rec, note);
+  } finally {
+    busy = false;
+    lessonMaking = false;
   }
 }
 

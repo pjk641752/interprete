@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-10-25.1";
+const APP_VERSION = "2026-10-31.1";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -578,8 +578,18 @@ function pauseAllowance(){
   return Math.min(MAX_PAUSE_MS, base + pauses * PAUSE_BONUS_MS);
 }
 
+/* The microphone is opened for one recording and handed back as soon as that
+   recording stops (releaseStream in onRecordingStopped). It used to stay open
+   for the life of the page, with the level meter's AudioContext attached to it.
+   An open capture is what makes a phone switch a Bluetooth car kit from music
+   (A2DP) to the hands-free call profile (HFP): the lesson then came out of the
+   car speakers thin, quiet or not at all. WebKit's own notes say the same of an
+   AudioContext left over after capture (Safari 16.4: «non-audible AudioContext
+   preventing the audio session to change from play-and-record after stopping
+   capture»). Reopening costs a moment at the start of each recording. */
 async function ensureStream(){
   if (stream && stream.active) return stream;
+  setAudioSessionType("auto");
   stream = await navigator.mediaDevices.getUserMedia({
     audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true }
   });
@@ -640,6 +650,34 @@ function stopLevelMeter(){
   if (levelTimer){ clearInterval(levelTimer); levelTimer = null; }
   analyser = null;
   el.lvl.style.width = "0%";
+  closeAudioCtx();
+}
+
+/* the meter's AudioContext is closed with the meter, not kept for next time */
+function closeAudioCtx(){
+  const c = audioCtx;
+  audioCtx = null;
+  if (c && c.state !== "closed"){ try { c.close().catch(() => {}); } catch (e) {} }
+}
+
+/* iPhone Safari (16.4+) lets a page say what its sound is: "playback" for the
+   lesson, so it is treated as media; "auto" again before the microphone opens.
+   Elsewhere there is no navigator.audioSession and this does nothing. */
+function setAudioSessionType(t){
+  try {
+    const s = navigator.audioSession;
+    if (s && s.type !== t) s.type = t;
+  } catch (e) {}
+}
+
+/* The lesson calls this when it starts to play: no microphone, no capture
+   AudioContext, media audio. A recording in progress is left alone. */
+function audioForPlayback(){
+  if (!recording){
+    releaseStream();
+    closeAudioCtx();
+  }
+  setAudioSessionType("playback");
 }
 
 /* The recording in flight, and where it is going.
@@ -676,6 +714,8 @@ function discardAskRecording(){
    started: ensureStream caches the stream, and leaving live tracks behind keeps
    the browser's recording indicator lit for a recording nobody is making. */
 function releaseStream(){
+  /* the meter's AudioContext goes with it, unless a meter is still running */
+  if (!levelTimer) closeAudioCtx();
   if (!stream) return;
   try { stream.getTracks().forEach((t) => t.stop()); } catch (e) {}
   stream = null;
@@ -707,6 +747,10 @@ async function startRecording(target){
   };
 
   try {
+    /* the meter's AudioContext is made here, inside the tap, before the wait for
+       the microphone: it is now closed after every recording, and one made after
+       an await may start suspended on a phone and leave the meter at zero */
+    try { audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)(); } catch (e) {}
     const s = await ensureStream();
 
     /* the lesson was closed, or another was opened, while the prompt was up */
@@ -736,6 +780,8 @@ async function startRecording(target){
     hardStop = setTimeout(() => { if (recording) stopRecording(); }, MAX_RECORD_MS);
   } catch (e) {
     drop();
+    /* the stream may have opened before the recorder failed: give it back */
+    releaseStream();
     showError("마이크를 열지 못했습니다.\n" + (e && e.message ? e.message : e) +
       "\n\n주소가 https 로 시작해야 마이크가 열립니다. 브라우저 설정에서 이 사이트의 마이크 권한도 확인하십시오.");
     resetMic();
@@ -748,13 +794,22 @@ function stopRecording(){
   durationMs = Date.now() - startedAt;
   if (hardStop){ clearTimeout(hardStop); hardStop = null; }
   stopLevelMeter();
-  try { if (recorder && recorder.state !== "inactive") recorder.stop(); } catch (e) {}
+  let stopping = false;
+  try {
+    if (recorder && recorder.state !== "inactive"){ recorder.stop(); stopping = true; }
+  } catch (e) {}
+  /* no onstop is coming to hand the microphone back, so hand it back here */
+  if (!stopping) releaseStream();
 }
 
 async function onRecordingStopped(){
   const mime = baseMime(recorder && recorder.mimeType);
   const blob = new Blob(chunks, { type: mime });
   chunks = [];
+  /* the recording is complete in `blob`: the microphone goes back right away,
+     before anything slow — see ensureStream. Not if a new recording already
+     took the same stream in the moment before this event arrived. */
+  if (!recording) releaseStream();
 
   /* A recording with no session predates this code path or arrived after a
      failed open; treating it as a translation is the old, safe default. */
