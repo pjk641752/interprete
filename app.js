@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-10-31.1";
+const APP_VERSION = "2026-10-31.2";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -49,10 +49,14 @@ const DEFAULTS = {
   stream: true,
   freeLimit: 250,
   fx: 18,
-  /* optional: when set, the lesson script and typed lesson questions go to
-     Claude; interpreting, the summary and spoken questions stay on Gemini */
+  /* optional: when set, everything that is text goes to Claude first —
+     interpreting, the summary, the lesson script, lesson questions. Speech is
+     turned into text by the browser's own speech recognition (Claude cannot
+     hear). Gemini is the fallback, and the whole path where recognition is
+     missing. aiOrder "gemini" turns the order round when both keys are set. */
   claudeKey: "",
-  claudeModel: "claude-sonnet-5-5"
+  claudeModel: "claude-sonnet-5-5",
+  aiOrder: "claude"
 };
 
 const SILENCE_RMS = 0.012;
@@ -76,7 +80,8 @@ const el = {};
   "settings","saveSettings","shareBtn","apiKey","model","dialect",
   "autoSpeak","autoStop","silence","stream","freeLimit","fx",
   "verNow","checkUpdate","verMsg",
-  "claudeKey","claudeModel","claudeCheck","claudeTest","claudeMsg",
+  "claudeKey","claudeModel","claudeCheck","claudeTest","claudeMsg","aiOrder",
+  "aiBadge","micPair","micKo","micEs","sttLive",
   "keySend","keyRecvIn","keyRecv","keyMsg",
   "usage","closeUsage","exportBtn","resetUsage",
   "uMonthCost","uMonthPeso","uDayReq","uDayLeft","uDayIn","uDayOut","uDayCost",
@@ -103,7 +108,15 @@ let settings = Object.assign({}, DEFAULTS, jget("interp.settings", {}));
   delete settings.modelFast; delete settings.modelGood; delete settings.mode; delete settings.tidy;
   if (!CLAUDE_MODELS[settings.claudeModel]) settings.claudeModel = DEFAULTS.claudeModel;
   if (typeof settings.claudeKey !== "string") settings.claudeKey = "";
+  if (settings.aiOrder !== "gemini") settings.aiOrder = "claude";
 })();
+
+/* Claude answers first when there is a Claude key and the order says so — or
+   when Claude is the only key there is. */
+function claudeFirst(){
+  return !!settings.claudeKey && (settings.aiOrder !== "gemini" || !settings.apiKey);
+}
+function hasAnyKey(){ return !!(settings.apiKey || settings.claudeKey); }
 
 function persist(){ jset("interp.settings", settings); }
 
@@ -147,10 +160,17 @@ function loadUsage(){
   if (!u.month || u.month.ym !== monthKey()) u.month = { ym: monthKey(), req:0, inTok:0, outTok:0, audTok:0, cost:0 };
   return u;
 }
-function addUsage(inTok, outTok, audTok, cost){
+/* `ai` says who was billed: "claude", or Gemini when left out. The totals stay
+   one sum; the split is kept beside them for the usage screen. */
+function addUsage(inTok, outTok, audTok, cost, ai){
   const u = loadUsage();
+  const who = ai === "claude" ? "claude" : "gemini";
   for (const b of [u.day, u.month]){
     b.req += 1; b.inTok += inTok; b.outTok += outTok; b.audTok += audTok; b.cost += cost;
+    if (!b.by || typeof b.by !== "object") b.by = {};
+    const s = b.by[who] || { req: 0, cost: 0 };
+    s.req += 1; s.cost += cost;
+    b.by[who] = s;
   }
   jset("interp.usage", u);
   return u;
@@ -217,13 +237,19 @@ function refreshUsageDialog(){
     : "—";
 
   const p = priceFor(settings.model);
+  const by = (u.month && u.month.by) || {};
+  const part = (k, name) => by[k] && by[k].req
+    ? name + " " + by[k].req + "회 " + fmtUsd(by[k].cost) : "";
+  const split = [part("claude", "Claude"), part("gemini", "Gemini")].filter(Boolean).join(" · ");
   el.uPrices.innerHTML =
+    (split ? "이번 달 나눠 보기: " + esc(split) + "<br><br>" : "") +
     "적용 중인 단가 (100만 토큰당)<br>" +
     settings.model + " — 입력 $" + p.in + " / 출력 $" + p.out +
       (p.audio ? " / 음성 $" + p.audio : "") + "<br>" +
     (settings.claudeKey
       ? settings.claudeModel + " — 입력 $" + priceFor(settings.claudeModel).in +
-        " / 출력 $" + priceFor(settings.claudeModel).out + " (수업 대본·글 질문)<br>"
+        " / 출력 $" + priceFor(settings.claudeModel).out +
+        (claudeFirst() ? " (통역·요약·수업 대본·질문 — 먼저 시도)" : " (Gemini 가 실패했을 때)") + "<br>"
       : "") + "<br>" +
     "음성은 1초에 " + AUDIO_TOKENS_PER_SEC + "토큰으로 계산됩니다. " +
     "요금은 이 단가표로 추산한 값이며 구글·Anthropic 의 실제 청구서와 다를 수 있습니다.";
@@ -292,7 +318,19 @@ function systemInstruction(kind){
     ]).concat(tail).join("\n");
   }
 
-  return head.concat([
+  /* the same rules for speech that reached us as a transcript: the browser's
+     speech recognition wrote it, so its words can be misheard and it has no
+     punctuation, but it is still someone thinking out loud */
+  const transcript = kind === "speech" ? [
+    "",
+    "THIS INPUT IS AN AUTOMATIC SPEECH-TO-TEXT TRANSCRIPT of what was said out loud.",
+    "Recognition can mishear a word as one that sounds alike, drop small words and leave out",
+    "punctuation. Read it the way it was spoken: when a word makes no sense, use the one that",
+    "sounds like it and fits. Everything below about how the speaker talks applies to it.",
+    "In <<<SRC>>> write the sentence they meant, cleaned up, in the language they spoke."
+  ] : [];
+
+  return head.concat(transcript).concat([
     "",
     "HOW THE SPEAKER TALKS",
     "This person is thinking out loud, live and unrehearsed. Expect heavy disfluency:",
@@ -383,10 +421,23 @@ function partialParse(acc){
 
 /* ---------------- API ---------------- */
 
-/* src is either {kind:"audio", data, mime} or {kind:"text", text} */
+/* The user turn for a text-shaped request, Gemini and Claude alike.
+   src.kind "speech" is a transcript from the browser's speech recognition;
+   src.lang is the language the button said they would speak. */
+function interpText(src){
+  if (src.kind === "speech"){
+    return "Interpret this speech. It is an automatic transcript of what was said out loud in " +
+      (src.lang === "es" ? "Spanish" : "Korean") +
+      ". Reply only in the required format.\n\n---\n" + src.text + "\n---";
+  }
+  return "Interpret this text. Reply only in the required format.\n\n---\n" + src.text + "\n---";
+}
+
+/* src is {kind:"audio", data, mime}, {kind:"text", text} or
+   {kind:"speech", text, lang} */
 function buildBody(src, model, stream){
-  const input = (src.kind === "text")
-    ? [{ type: "text", text: "Interpret this text. Reply only in the required format.\n\n---\n" + src.text + "\n---" }]
+  const input = (src.kind !== "audio")
+    ? [{ type: "text", text: interpText(src) }]
     : [
         { type: "text", text: "Interpret this audio. Reply only in the required format." },
         { type: "audio", data: src.data, mime_type: src.mime }
@@ -434,16 +485,34 @@ function extractText(json){
   return "";
 }
 
+/* One line a person can act on: which key, why it stopped, what to do. The
+   raw status and message follow underneath for anyone who needs them. The old
+   «무료 한도 … 빠름 모드로» line was wrong on every count for a paid key with a
+   spending cap: there is no 빠름 모드 any more and a cap is not a free quota. */
+const CLAUDE_TIP = " Claude 키가 있으면 설정에서 «Claude 먼저» 로 두면 Claude 로 계속 쓸 수 있습니다.";
+function geminiWhy(status, msg){
+  const m = String(msg || "");
+  if (status === 429 && /spend(ing)?\s*cap|spend limit|spending limit|monthly spend/i.test(m))
+    return "Gemini 키가 막혔습니다 — 이번 달 지출 상한에 닿았습니다. AI Studio(aistudio.google.com) 의 Spend(지출) 화면에서 월 상한을 올리거나 다음 달까지 기다리십시오." + CLAUDE_TIP;
+  if (status === 429)
+    return "Gemini 키가 잠시 막혔습니다 — 분당·하루 요청 한도에 걸렸습니다. 1분쯤 뒤 다시 하시거나 AI Studio 에서 결제 등급을 확인하십시오." + CLAUDE_TIP;
+  if (status === 400 && /API key not valid|API_KEY_INVALID|api[ _-]?key/i.test(m))
+    return "Gemini 키가 맞지 않습니다. 설정에서 키를 다시 붙여넣으십시오 (발급: aistudio.google.com/apikey).";
+  if (status === 400 && /location is not supported|user location/i.test(m))
+    return "Gemini 가 이 지역의 무료 사용을 막았습니다. AI Studio 에서 결제를 연결하십시오." + CLAUDE_TIP;
+  if (status === 400 && /model|not found|not supported|invalid/i.test(m))
+    return "Gemini 모델 이름이 맞지 않습니다. 설정에서 모델을 바꿔주십시오.";
+  if (status === 403 && /billing|disabled|has not been used|SERVICE_DISABLED/i.test(m))
+    return "Gemini 키의 프로젝트에서 결제가 막혔거나 API 가 꺼져 있습니다. AI Studio 의 결제(Billing) 화면을 확인하십시오." + CLAUDE_TIP;
+  if (status === 401 || status === 403)
+    return "Gemini 키가 거절됐습니다 (잘못됐거나, 유출로 막혔거나, 제한이 걸린 키). AI Studio 에서 키를 확인하거나 새로 만드십시오.";
+  if (status >= 500)
+    return "Gemini 서버가 잠시 응답하지 않습니다. 잠시 뒤 다시 하십시오.";
+  return "";
+}
 function apiError(status, msg, model){
-  let friendly = "";
-  if (status === 429){
-    friendly = "무료 한도에 걸렸습니다. 잠시 기다렸다 다시 말하시거나, 빠름 모드로 바꾸거나, 결제를 연결하십시오.\n\n";
-  } else if (status === 400 && /model|not found|not supported|invalid/i.test(msg)){
-    friendly = "모델 이름이 맞지 않습니다. 설정에서 모델을 바꿔주십시오.\n\n";
-  } else if (status === 401 || status === 403){
-    friendly = "API 키가 잘못되었거나 권한이 없습니다. 설정에서 키를 다시 확인하십시오.\n\n";
-  }
-  return new Error(friendly + "API " + status + " (" + model + ")\n" + msg);
+  const why = geminiWhy(status, msg);
+  return new Error((why ? why + "\n\n" : "") + "API " + status + " (" + model + ")\n" + msg);
 }
 
 /* Pull one JSON object out of each SSE "data:" line. */
@@ -525,19 +594,79 @@ async function callBlocking(src, model){
   return { text: text, usage: readUsage(json) };
 }
 
-async function interpret(src, onPartial){
+async function interpretGemini(src, onPartial){
   const model = settings.model;
   if (settings.stream){
     try {
       const r = await callStreaming(src, model, onPartial);
-      if (r) return Object.assign(r, { model: model });
+      if (r){ noteAi("gemini", model); return Object.assign(r, { model: model }); }
     } catch (e) {
       // a real API error (bad key, quota, bad model) must surface, not silently retry
       if (/API \d{3}/.test(e.message)) throw e;
     }
   }
   const r = await callBlocking(src, model);
+  noteAi("gemini", model);
   return Object.assign(r, { model: model });
+}
+
+/* Interpreting is short and frequent, so Claude is asked for little thinking
+   (effort low) and streamed, so the first words show as soon as they exist.
+   Its tokens are billed inside callClaude, so `billed` tells runInterpret not
+   to count them again. */
+const CLAUDE_INTERP_TIMEOUT_MS = 45000;
+const CLAUDE_INTERP_MAX_TOKENS = 4000;
+async function interpretClaude(src, onPartial){
+  const meta = {};
+  const text = await callClaude(systemInstruction(src.kind), interpText(src), {
+    effort: "low", maxTokens: CLAUDE_INTERP_MAX_TOKENS, timeoutMs: CLAUDE_INTERP_TIMEOUT_MS,
+    onDelta: onPartial, meta: meta
+  });
+  if (!partialParse(text).dst) throw claudeError("Claude 답의 형식을 알 수 없습니다", 0, text);
+  return { text: text, model: meta.model || settings.claudeModel, billed: true,
+           usage: { inTok: meta.inTok || 0, outTok: meta.outTok || 0 } };
+}
+
+/* Two failures are reported as two: which key failed, and why, for each. */
+function bothFailed(errs, order){
+  if (errs.length === 1) return errs[0];
+  const name = (w) => (w === "claude" ? "Claude" : "Gemini");
+  const msg = (e) => String((e && e.message) || e);
+  return new Error("두 AI 모두 실패했습니다.\n\n" +
+    errs.map((e, i) => "① ② ③".split(" ")[i] + " " + name(order[i]) + ": " + msg(e)).join("\n\n"));
+}
+
+/* Text (typed, or speech the browser already wrote down) goes to whichever AI
+   comes first by the settings, then to the other; audio only Gemini can take. */
+async function interpret(src, onPartial){
+  const order = [];
+  if (src.kind !== "audio" && settings.claudeKey) order.push("claude");
+  if (settings.apiKey){
+    if (claudeFirst()) order.push("gemini"); else order.unshift("gemini");
+  }
+  if (!order.length) throw new Error(src.kind === "audio"
+    ? "녹음을 통역하려면 Gemini 키가 필요합니다. 설정에서 넣으십시오."
+    : "API 키가 없습니다. 설정에서 Claude 또는 Gemini 키를 넣으십시오.");
+  const errs = [];
+  for (let i = 0; i < order.length; i++){
+    if (i > 0) setStatus((order[i - 1] === "claude" ? "Claude" : "Gemini") + " 실패 → " +
+                         (order[i] === "claude" ? "Claude" : "Gemini") + " 로 대신 번역 중…");
+    try {
+      return order[i] === "claude" ? await interpretClaude(src, onPartial)
+                                   : await interpretGemini(src, onPartial);
+    } catch (e) { errs.push(e); }
+  }
+  throw bothFailed(errs, order);
+}
+
+/* The small tag in the header: which AI wrote the last answer. */
+function noteAi(who, model){
+  const b = el.aiBadge;
+  if (!b) return;
+  b.textContent = who === "claude" ? "Claude" : "Gemini";
+  b.className = "ai-badge " + (who === "claude" ? "claude" : "gemini");
+  b.title = "마지막 답: " + (model || "");
+  b.hidden = false;
 }
 
 /* ---------------- recording ---------------- */
@@ -705,8 +834,10 @@ const askSessions = new Set();
 function discardAskRecording(){
   if (!askSessions.size) return false;
   askSessions.forEach((s) => { s.discarded = true; });
-  /* only the one actually holding the microphone needs stopping */
-  if (recording && recSession && recSession.target === "ask") stopRecording();
+  /* only the one actually holding the microphone needs stopping; speech
+     recognition is aborted outright, nothing it heard is wanted */
+  if (stt && stt.sess.target === "ask") sttAbort(stt);
+  else if (recording && recSession && recSession.target === "ask") stopRecording();
   return true;
 }
 
@@ -721,9 +852,294 @@ function releaseStream(){
   stream = null;
 }
 
-async function startRecording(target){
-  if (busy || recording) return;
-  if (!settings.apiKey){ openSettings(); return; }
+/* ---------------- speech recognition (Claude first) ----------------
+
+   Claude cannot hear, so with Claude first the browser writes the speech down
+   (Web Speech API) and Claude gets the text. Recognition needs to be told the
+   language, which is why the one microphone becomes two buttons there.
+
+   The microphone: this path never calls getUserMedia and never makes an
+   AudioContext — the browser's recogniser holds the microphone itself, and
+   stop()/abort() is how it is handed back. Every way out goes through
+   sttFinish, which aborts the recogniser (a no-op once it has ended) and drops
+   its handlers, so nothing of it outlives the utterance. That is the same rule
+   as the recording path's (tracks stopped, AudioContext closed) for the same
+   reason: an open capture keeps a car's Bluetooth on the hands-free profile.
+
+   Pauses: the recogniser is asked to keep going (continuous) and this code
+   decides when the speaker is done, with the same growing allowance the
+   recorder uses (pauseAllowance). Chrome on Android ignores `continuous` (MDN)
+   and ends after the first pause; a recogniser that ends while the speaker
+   still has time left is started again, and the text carries over. */
+const STT_LANG = { ko: "ko-KR", es: "es-MX" };
+const STT_END_WAIT_MS = 2500;    // after stop(), how long the last words may take
+const STT_NO_SPEECH_MS = 9000;   // nothing heard at all for this long: give up
+const STT_RESTARTS = 6;
+/* errors after which recognition is not offered again this session: the
+   recording path (Gemini) takes over when there is a Gemini key */
+const STT_FATAL = /^(service-not-allowed|network|language-not-supported|audio-capture|bad-grammar|start)$/;
+let stt = null;
+let sttBroken = false;
+
+function sttCtor(){
+  return (typeof window !== "undefined" && (window.SpeechRecognition || window.webkitSpeechRecognition)) || null;
+}
+function sttSupported(){ return !sttBroken && typeof sttCtor() === "function"; }
+function useStt(){ return claudeFirst() && sttSupported(); }
+
+/* Two buttons when speech goes through recognition, the one microphone
+   otherwise. Gemini mode is exactly the old screen. */
+function refreshMicUi(){
+  const two = useStt();
+  if (el.micPair) el.micPair.hidden = !two;
+  el.mic.hidden = two && !!el.micPair;
+}
+const PAIR_LABEL = { ko: "🇰🇷 내가 말하기", es: "🇲🇽 상대 말 듣기" };
+/* state: "idle" | "busy" | "rec" (with which button is listening) */
+function pairFace(state, lang){
+  for (const k of ["ko", "es"]){
+    const b = k === "ko" ? el.micKo : el.micEs;
+    if (!b) continue;
+    const on = state === "rec" && lang === k;
+    b.classList.toggle("rec", on);
+    b.classList.toggle("busy", state === "busy");
+    b.disabled = state === "busy" || (state === "rec" && !on);
+    b.textContent = on ? "■ 그만" : state === "busy" ? "…" : PAIR_LABEL[k];
+  }
+}
+
+/* Android repeats the earlier text inside a later result; a piece that
+   already starts with what came before replaces it instead of doubling it. */
+function joinStt(a, b){
+  a = String(a || "").trim(); b = String(b || "").trim();
+  if (!a) return b;
+  if (!b) return a;
+  if (b.toLowerCase().indexOf(a.toLowerCase()) === 0) return b;
+  if (a.toLowerCase().indexOf(b.toLowerCase()) === 0) return a;
+  return a + " " + b;
+}
+const sttText = (s) => joinStt(s.carry, s.inst);
+
+function sttPreview(s){
+  const t = sttText(s);
+  if (s.sess.target === "ask"){
+    if (typeof lessonAskPreview === "function") lessonAskPreview(t);
+    return;
+  }
+  if (!el.sttLive) return;
+  el.sttLive.textContent = t ? "🎤 " + t : "";
+  el.sttLive.hidden = !t;
+}
+
+function sttErrorText(code){
+  switch (code){
+    case "not-allowed": return "마이크(받아쓰기) 권한이 막혀 있습니다. 브라우저 설정에서 이 사이트의 마이크를 허용하십시오.";
+    case "service-not-allowed": return "이 기기에서 받아쓰기를 쓸 수 없습니다 (아이폰은 설정 → 일반 → 키보드 → 받아쓰기 켜기).";
+    case "network": return "받아쓰기 서버에 닿지 못했습니다 (받아쓰기는 인터넷이 필요합니다).";
+    case "language-not-supported": return "이 브라우저의 받아쓰기가 이 언어를 지원하지 않습니다.";
+    case "audio-capture": return "마이크를 찾지 못했습니다.";
+    case "start": return "받아쓰기를 시작하지 못했습니다.";
+    default: return "";
+  }
+}
+
+function sttWire(s, rec){
+  rec.lang = STT_LANG[s.lang] || "ko-KR";
+  rec.continuous = true;
+  rec.interimResults = true;
+  try { rec.maxAlternatives = 1; } catch (e) {}
+  rec.onresult = (ev) => {
+    if (stt !== s || s.done) return;
+    let fin = "", mid = "";
+    const list = (ev && ev.results) || [];
+    for (let i = 0; i < list.length; i++){
+      const r = list[i];
+      const t = (r && r[0] && r[0].transcript) || "";
+      if (r && r.isFinal) fin = joinStt(fin, t); else mid = joinStt(mid, t);
+    }
+    s.inst = joinStt(fin, mid);
+    const now = Date.now();
+    /* they picked the thread back up after a pause: more patience next time */
+    if (s.lastHeard && now - s.lastHeard > 700) pauses++;
+    if (s.inst) s.lastHeard = now;
+    if (!s.stopping) setStatus("듣는 중…");
+    sttPreview(s);
+  };
+  rec.onerror = (ev) => { s.error = (ev && ev.error) || "error"; };
+  rec.onend = () => {
+    if (s.done || s.rec !== rec) return;
+    /* ended on its own while the speaker still had time: listen on */
+    const fatal = STT_FATAL.test(s.error) || s.error === "not-allowed";
+    if (!s.stopping && !fatal && s.lastHeard && s.restarts < STT_RESTARTS &&
+        Date.now() - s.startedAt < MAX_RECORD_MS){
+      s.carry = sttText(s);
+      s.inst = "";
+      s.error = "";
+      s.restarts++;
+      try {
+        const Ctor = sttCtor();
+        const next = new Ctor();
+        s.rec = next;
+        sttWire(s, next);
+        next.start();
+        return;
+      } catch (e) { /* falls through to finishing with what was heard */ }
+    }
+    sttFinish(s);
+  };
+}
+
+function startStt(target, lang){
+  showError("");
+  const sess = { target: target === "ask" ? "ask" : "interpret", discarded: false, tag: null };
+  if (sess.target === "ask"){
+    if (typeof lessonAskTag === "function") sess.tag = lessonAskTag();
+    askSessions.add(sess);
+  }
+  recSession = sess;
+  const s = { sess: sess, lang: lang, rec: null, carry: "", inst: "", error: "",
+              startedAt: Date.now(), lastHeard: 0, restarts: 0,
+              stopping: false, done: false, tick: null, endWait: null };
+  stt = s;
+  pauses = 0;
+  /* the same hand-over the recorder makes before it opens the microphone */
+  setAudioSessionType("auto");
+  try {
+    const Ctor = sttCtor();
+    s.rec = new Ctor();
+    sttWire(s, s.rec);
+    s.rec.start();
+  } catch (e) {
+    s.error = "start";
+    sttFinish(s);
+    return;
+  }
+  recording = true;
+  startedAt = s.startedAt;
+  durationMs = 0;
+  if (sess.target === "interpret") pairFace("rec", lang);
+  setStatus(lang === "es" ? "듣는 중… (스페인어)" : "듣는 중… (한국어)");
+  hardStop = setTimeout(() => { if (stt === s) sttStop(s); }, MAX_RECORD_MS);
+  s.tick = setInterval(() => {
+    if (stt !== s || s.stopping) return;
+    const now = Date.now();
+    if (!s.lastHeard){
+      if (now - s.startedAt > STT_NO_SPEECH_MS) sttStop(s);
+      return;
+    }
+    const waited = now - s.lastHeard, allowance = pauseAllowance();
+    if (waited > 600){
+      const left = Math.max(0, Math.ceil((allowance - waited) / 1000));
+      setStatus("계속 말씀하셔도 됩니다 · " + left + "초 뒤 자동 종료");
+    }
+    if (settings.autoStop && waited > allowance && now - s.startedAt > MIN_SPEECH_MS) sttStop(s);
+  }, 200);
+}
+
+/* Done listening: the recogniser is asked for its last words, and given a
+   moment for them; then it is aborted either way. */
+function sttStop(s){
+  if (!s || s.stopping || s.done) return;
+  s.stopping = true;
+  recording = false;
+  durationMs = Date.now() - s.startedAt;
+  if (hardStop){ clearTimeout(hardStop); hardStop = null; }
+  if (s.tick){ clearInterval(s.tick); s.tick = null; }
+  if (s.sess.target === "ask" && typeof lessonAskConverting === "function") lessonAskConverting();
+  else pairFace("busy");
+  setStatus("받아쓰는 중…");
+  try { s.rec.stop(); } catch (e) {}
+  s.endWait = setTimeout(() => sttFinish(s), STT_END_WAIT_MS);
+}
+
+/* Nothing it heard is wanted (the lesson was closed, the page went away). */
+function sttAbort(s){
+  if (!s || s.done) return;
+  s.sess.discarded = true;
+  s.stopping = true;
+  sttFinish(s);
+}
+
+function sttFinish(s){
+  if (!s || s.done) return;
+  s.done = true;
+  if (s.tick){ clearInterval(s.tick); s.tick = null; }
+  if (s.endWait){ clearTimeout(s.endWait); s.endWait = null; }
+  if (stt === s){
+    stt = null;
+    recording = false;
+    if (hardStop){ clearTimeout(hardStop); hardStop = null; }
+    if (!durationMs) durationMs = Date.now() - s.startedAt;
+  }
+  /* the microphone goes back here, whatever state the recogniser is in */
+  const rec = s.rec;
+  if (rec){
+    rec.onresult = null; rec.onerror = null; rec.onend = null;
+    try { rec.abort(); } catch (e) {}
+  }
+  if (el.sttLive){ el.sttLive.textContent = ""; el.sttLive.hidden = true; }
+
+  const sess = s.sess;
+  const release = () => {
+    askSessions.delete(sess);
+    if (recSession === sess) recSession = null;
+  };
+  release();
+  if (sess.discarded){
+    resetMic();
+    if (sess.target === "ask"){
+      if (typeof lessonAskPreview === "function") lessonAskPreview("");
+      /* the bar must be unlocked: a closed lesson's tag is no longer valid and
+         this just goes idle; a lesson still open (the page was hidden) says why */
+      if (typeof lessonAskFailed === "function")
+        lessonAskFailed("화면이 꺼져 받아쓰기를 멈췄습니다 — 다시 말해 주십시오.", sess.tag);
+    }
+    return;
+  }
+  const text = sttText(s);
+  const ms = Date.now() - s.startedAt;
+  if (!text){
+    resetMic();
+    let why = sttErrorText(s.error);
+    if (STT_FATAL.test(s.error) && settings.apiKey){
+      sttBroken = true;
+      refreshMicUi();
+      why += " 녹음 방식(Gemini)으로 바꿨습니다 — 다시 눌러 주십시오.";
+    }
+    if (sess.target === "ask"){
+      if (typeof lessonAskFailed === "function") lessonAskFailed(why || "잘 안 들렸습니다 — 다시 말해 주십시오.", sess.tag);
+    } else {
+      showError(why);
+      setStatus(why ? "받아쓰기 실패" : "잘 안 들렸습니다 — 다시 말해 주십시오");
+    }
+    return;
+  }
+  if (sess.target === "ask"){
+    resetMic();
+    if (typeof lessonAskText === "function") lessonAskText(text, sess.tag);
+    return;
+  }
+  runInterpret({ kind: "speech", text: text, lang: s.lang }, ms);
+}
+
+/* the page going to the background must not keep listening */
+document.addEventListener("visibilitychange", () => {
+  if (document.visibilityState === "hidden" && stt) sttAbort(stt);
+});
+window.addEventListener("pagehide", () => { if (stt) sttAbort(stt); });
+
+/* `lang` ("ko" | "es") is only used on the speech-recognition path, where the
+   button said which language is about to be spoken. */
+async function startRecording(target, lang){
+  if (busy || recording || stt) return;
+  /* Claude first and the browser can write speech down: no recording, no
+     microphone stream, no AudioContext of ours — see startStt */
+  if (useStt()){ startStt(target, target === "ask" ? "ko" : (lang === "es" ? "es" : "ko")); return; }
+  if (!settings.apiKey){
+    if (settings.claudeKey) showError("이 브라우저는 받아쓰기(음성 인식)를 지원하지 않아 말은 Gemini 키로만 통역됩니다. 글로 쓰시거나 설정에서 Gemini 키를 넣으십시오.");
+    else openSettings();
+    return;
+  }
   showError("");
 
   /* The session is created and registered BEFORE the microphone is asked for.
@@ -789,6 +1205,7 @@ async function startRecording(target){
 }
 
 function stopRecording(){
+  if (stt){ sttStop(stt); return; }
   if (!recording) return;
   recording = false;
   durationMs = Date.now() - startedAt;
@@ -876,6 +1293,7 @@ async function runInterpret(src, audioMs){
   el.mic.classList.add("busy");
   el.mic.textContent = "…";
   el.mic.disabled = true;
+  pairFace("busy");
   el.textSend.disabled = true;
   setStatus("번역 중…");
 
@@ -893,11 +1311,13 @@ async function runInterpret(src, audioMs){
     if (!p.dst) throw new Error("형식을 알 수 없는 응답입니다.\n" + out.text.slice(0, 300));
 
     const elapsed = Date.now() - t0;
-    const audTok = audioMs ? Math.round((audioMs / 1000) * AUDIO_TOKENS_PER_SEC) : 0;
+    /* only real audio is billed as audio; a transcript is text */
+    const audTok = audioMs && src.kind === "audio" ? Math.round((audioMs / 1000) * AUDIO_TOKENS_PER_SEC) : 0;
     const inTok = (out.usage && out.usage.inTok) || (audTok + 320);
     const outTok = (out.usage && out.usage.outTok) || Math.round((p.dst.length + p.src.length) / 2.5);
     const cost = computeCost(out.model, inTok, outTok, audTok);
-    addUsage(inTok, outTok, audTok, cost);
+    /* Claude's tokens were already counted where they were billed */
+    if (!out.billed) addUsage(inTok, outTok, audTok, cost);
     refreshMeter();
 
     if (/^UNCLEAR$/i.test(p.dst)){
@@ -916,6 +1336,8 @@ async function runInterpret(src, audioMs){
         tip: p.tip,
         study: p.study,
         model: out.model,
+        /* what the browser's speech recognition wrote down, before the AI tidied it */
+        heard: src.kind === "speech" ? String(src.text || "") : undefined,
         ms: elapsed,
         audioMs: audioMs || 0,
         inTok: inTok, outTok: outTok, cost: cost
@@ -938,8 +1360,8 @@ async function runInterpret(src, audioMs){
 }
 
 async function translateTyped(){
-  if (busy || recording) return;
-  if (!settings.apiKey){ openSettings(); return; }
+  if (busy || recording || stt) return;
+  if (!hasAnyKey()){ openSettings(); return; }
   const text = el.textIn.value.trim();
   if (!text) return;
   if (text.length > 6000){ showError("글이 너무 깁니다. 6000자 이내로 나눠서 넣어주십시오."); return; }
@@ -955,6 +1377,7 @@ function resetMic(){
   el.mic.classList.remove("rec","busy");
   el.mic.textContent = "🎙";
   el.mic.disabled = false;
+  pairFace("idle");
 }
 
 /* ---------------- rendering ---------------- */
@@ -991,6 +1414,7 @@ function render(entry){
       '<div class="dir">' + dirLabel(entry.from, entry.to) + '</div>' +
       '<p class="dst ' + entry.to + '">' + esc(entry.dst) + '</p>' +
       '<p class="src">' + esc(entry.src) + '</p>' +
+      (entry.heard ? '<p class="heard">🎤 받아쓰기: ' + esc(entry.heard) + '</p>' : "") +
       tipHtml(entry.tip) +
       '<div class="row">' +
         '<button class="mini" data-act="speak">🔊 읽어주기</button>' +
@@ -1152,6 +1576,7 @@ async function callPlain(systemInstr, input, genConfig, audioMs){
   }
   const text = extractText(json);
   if (!text) throw new Error("정리 결과를 받지 못했습니다.\n" + raw.slice(0, 300));
+  noteAi("gemini", settings.model);
   const u = readUsage(json);
   if (u){
     /* the reply's own token count already covers the audio, so audTok is only
@@ -1188,6 +1613,25 @@ function claudeError(msg, status, partial){
   e.status = status || 0;
   e.partial = partial || "";
   return e;
+}
+
+/* Which key, why, what to do — the Claude side of geminiWhy. Error types are
+   Anthropic's (402 billing_error, 429 rate_limit_error, 529 overloaded_error);
+   a low credit balance has also been reported as a 400 that says so. */
+function claudeWhy(status, type, msg){
+  const m = String(msg || "");
+  if (status === 401 || type === "authentication_error")
+    return "Claude 키가 맞지 않습니다. 설정에서 키를 다시 넣으십시오 (발급: platform.claude.com → API Keys).";
+  if (status === 402 || type === "billing_error" || /credit balance|billing/i.test(m))
+    return "Claude 키가 막혔습니다 — 크레딧(잔액)이 없습니다. platform.claude.com → Billing 에서 충전하십시오.";
+  if (status === 403 || type === "permission_error")
+    return "Claude 키에 이 요청 권한이 없습니다. platform.claude.com 에서 키와 워크스페이스 설정을 확인하십시오.";
+  if (status === 429 || type === "rate_limit_error")
+    return "Claude 요청 한도에 걸렸습니다. 잠시 뒤 다시 하십시오 (한도: platform.claude.com → Limits).";
+  if (status === 529 || type === "overloaded_error")
+    return "Claude 서버가 붐빕니다. 잠시 뒤 다시 하십시오.";
+  if (status >= 500) return "Claude 서버가 잠시 응답하지 않습니다. 잠시 뒤 다시 하십시오.";
+  return "";
 }
 
 /* One streamed Messages call. Streaming keeps a long script from sitting on
@@ -1229,10 +1673,8 @@ async function callClaude(system, text, opts){
       const raw = await res.text().catch(() => "");
       let j = null; try { j = JSON.parse(raw); } catch (e) {}
       const m = (j && j.error && j.error.message) || raw.slice(0, 200);
-      const why = res.status === 401 || res.status === 403
-        ? "Claude 키가 잘못되었거나 권한이 없습니다. 설정에서 키를 확인하십시오.\n"
-        : res.status === 429 ? "Claude 요청 한도에 걸렸습니다. 잠시 뒤 다시 하십시오.\n" : "";
-      throw claudeError(why + "Claude API " + res.status + " (" + model + ") " + m, res.status);
+      const why = claudeWhy(res.status, (j && j.error && j.error.type) || "", m);
+      throw claudeError((why ? why + "\n" : "") + "Claude API " + res.status + " (" + model + ") " + m, res.status);
     }
     const onEv = (ev) => {
       if (!ev || typeof ev !== "object") return;
@@ -1242,6 +1684,7 @@ async function callClaude(system, text, opts){
         outTok = u.output_tokens || outTok;
       } else if (ev.type === "content_block_delta" && ev.delta && ev.delta.type === "text_delta"){
         acc += ev.delta.text || "";
+        if (opts.onDelta && ev.delta.text){ try { opts.onDelta(acc); } catch (e) {} }
       } else if (ev.type === "message_delta"){
         if (ev.delta && ev.delta.stop_reason) stop = ev.delta.stop_reason;
         if (ev.usage && typeof ev.usage.output_tokens === "number") outTok = ev.usage.output_tokens;
@@ -1268,13 +1711,18 @@ async function callClaude(system, text, opts){
     }
     /* billed whether or not the text turns out usable */
     if (inTok || outTok){
-      addUsage(inTok, outTok, 0, computeCost(model, inTok, outTok, 0));
+      addUsage(inTok, outTok, 0, computeCost(model, inTok, outTok, 0), "claude");
       refreshMeter();
     }
-    if (failMsg) throw claudeError("Claude 오류: " + failMsg, 0, acc);
+    if (opts.meta){ opts.meta.inTok = inTok; opts.meta.outTok = outTok; opts.meta.model = model; }
+    if (failMsg){
+      const busyNow = /overload/i.test(failMsg) ? "Claude 서버가 붐빕니다. 잠시 뒤 다시 하십시오.\n" : "";
+      throw claudeError(busyNow + "Claude 오류: " + failMsg, 0, acc);
+    }
     if (stop === "max_tokens") throw claudeError("Claude 답이 길이 한도에서 잘렸습니다", 0, acc);
     if (stop === "refusal") throw claudeError("Claude 가 답을 거절했습니다", 0, acc);
     if (!acc.trim()) throw claudeError("Claude 답이 비어 있습니다", 0, acc);
+    noteAi("claude", model);
     return acc.trim();
   } finally {
     if (timer) clearTimeout(timer);
@@ -1294,6 +1742,14 @@ async function viaClaude(system, text, geminiCall, opts){
   opts = opts || {};
   const route = opts.route || {};
   if (!settings.claudeKey || (route.claudeFailed && settings.apiKey)) return geminiCall();
+  /* «Gemini 먼저»: the same two, the other way round */
+  let gErr = null;
+  if (!claudeFirst() && !route.geminiFailed){
+    try { const r = await geminiCall(); route.by = "gemini"; return r; }
+    catch (e) { gErr = e; route.geminiFailed = true; }
+    const note = "Gemini 실패 → Claude 로 대신";
+    try { if (opts.onFallback) opts.onFallback(note, gErr); else setStatus(note); } catch (e) {}
+  }
   let err = null, got = "";
   try {
     got = await callClaude(system, text, opts);
@@ -1304,18 +1760,21 @@ async function viaClaude(system, text, geminiCall, opts){
     err = e;
   }
   route.claudeFailed = true;
-  if (!settings.apiKey){
+  if (!settings.apiKey || gErr || route.geminiFailed){
     route.by = "claude";
-    /* nothing to fall back to: the text Claude did send (a complete reply that
-       failed `validate`, or a cut-off one) goes to the caller's own salvage */
+    /* nothing (left) to fall back to: the text Claude did send (a complete
+       reply that failed `validate`, or a cut-off one) goes to the caller's own
+       salvage */
     const text2 = got || (err && err.partial) || "";
     if (text2) return text2;
+    if (gErr) throw bothFailed([gErr, err], ["gemini", "claude"]);
     throw err;
   }
   route.by = "gemini";
   const note = "Claude 실패 → Gemini 로 대신";
   try { if (opts.onFallback) opts.onFallback(note, err); else setStatus(note); } catch (e) {}
-  return geminiCall();
+  try { return await geminiCall(); }
+  catch (e2) { throw bothFailed([err, e2], ["claude", "gemini"]); }
 }
 
 function todaysEntries(){
@@ -1337,12 +1796,18 @@ async function buildDailyNote(rows){
   const iso = todayKey();
   const header = "오늘은 " + Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) +
                  "일이고, 대화는 " + rows.length + "회입니다.\n\n";
-  return await callPlain(SUMMARY_PROMPT, header + JSON.stringify(payload));
+  const body = header + JSON.stringify(payload);
+  /* Claude first when there is a Claude key (low effort: it is a summary) */
+  return await viaClaude(SUMMARY_PROMPT, body, () => callPlain(SUMMARY_PROMPT, body), {
+    maxTokens: SUMMARY_CLAUDE_MAX_TOKENS, effort: "low", timeoutMs: SUMMARY_CLAUDE_TIMEOUT_MS
+  });
 }
+const SUMMARY_CLAUDE_MAX_TOKENS = 8000;
+const SUMMARY_CLAUDE_TIMEOUT_MS = 90000;
 
 async function sendDailyNote(){
-  if (busy || recording) return;
-  if (!settings.apiKey){ openSettings(); return; }
+  if (busy || recording || stt) return;
+  if (!hasAnyKey()){ openSettings(); return; }
 
   const rows = todaysEntries();
   if (!rows.length){ alert("오늘 나눈 대화가 없습니다."); return; }
@@ -1433,6 +1898,7 @@ function openSettings(){
   el.fx.value = settings.fx;
   el.claudeKey.value = settings.claudeKey;
   el.claudeModel.value = CLAUDE_MODELS[settings.claudeModel] ? settings.claudeModel : DEFAULTS.claudeModel;
+  if (el.aiOrder) el.aiOrder.value = settings.aiOrder === "gemini" ? "gemini" : "claude";
   el.claudeMsg.textContent = "";
   el.keyMsg.textContent = "";
   el.keyRecvIn.value = "";
@@ -1453,12 +1919,14 @@ el.saveSettings.onclick = () => {
   settings.fx = Math.max(0, Number(el.fx.value) || 0);
   settings.claudeKey = el.claudeKey.value.trim();
   settings.claudeModel = CLAUDE_MODELS[el.claudeModel.value] ? el.claudeModel.value : DEFAULTS.claudeModel;
+  if (el.aiOrder) settings.aiOrder = el.aiOrder.value === "gemini" ? "gemini" : "claude";
   persist();
   if (typeof lessonSaveSettings === "function") lessonSaveSettings();
   closeDlg(el.settings);
   showError("");
   refreshMeter();
-  setStatus(settings.apiKey ? "준비됨 — 버튼을 누르고 말하십시오" : "API 키를 먼저 넣어주십시오");
+  refreshMicUi();
+  setStatus(hasAnyKey() ? "준비됨 — 버튼을 누르고 말하십시오" : "API 키를 먼저 넣어주십시오");
 };
 el.shareBtn.onclick = shareApp;
 
@@ -1598,6 +2066,7 @@ function importKeys(keys){
   if (!ok) return false;
   applyKeys(keys);
   refreshMeter();
+  refreshMicUi();
   if (el.settings.open) openSettings();          // the dialog shows the new values
   setStatus(settings.apiKey ? "키를 넣었습니다 — 준비됨" : "키를 넣었습니다");
   return true;
@@ -1682,6 +2151,14 @@ el.resetUsage.onclick = () => {
 };
 
 el.mic.onclick = () => { if (busy) return; recording ? stopRecording() : startRecording("interpret"); };
+/* Claude first: the button says which language is about to be spoken */
+const pairTap = (lang) => () => {
+  if (busy) return;
+  if (stt || recording){ stopRecording(); return; }
+  startRecording("interpret", lang);
+};
+if (el.micKo) el.micKo.onclick = pairTap("ko");
+if (el.micEs) el.micEs.onclick = pairTap("es");
 
 function autoGrow(){
   el.textIn.style.height = "auto";
@@ -1695,7 +2172,10 @@ el.textIn.addEventListener("keydown", (e) => {
 });
 
 document.addEventListener("keydown", (e) => {
-  if (e.code === "Space" && e.target === document.body){ e.preventDefault(); el.mic.click(); }
+  if (e.code === "Space" && e.target === document.body){
+    e.preventDefault();
+    (el.mic.hidden && el.micKo ? (stt && stt.lang === "es" ? el.micEs : el.micKo) : el.mic).click();
+  }
 });
 
 /* ---------------- PWA ---------------- */
@@ -1797,8 +2277,9 @@ if ("serviceWorker" in navigator && secureCtx){
 persist();
 refreshMeter();
 showWelcome();
+refreshMicUi();
 
-if (!settings.apiKey){
+if (!hasAnyKey()){
   setStatus("API 키를 먼저 넣어주십시오");
   openSettings();
 }
@@ -1817,6 +2298,6 @@ if (/^#import=/.test(location.hash || "")){
   if (document.readyState === "loading") document.addEventListener("DOMContentLoaded", runImport);
   else setTimeout(runImport, 0);
 }
-if (!navigator.mediaDevices || !window.MediaRecorder){
+if ((!navigator.mediaDevices || !window.MediaRecorder) && !useStt()){
   showError("이 브라우저는 녹음을 지원하지 않습니다. 크롬 또는 사파리 최신 버전에서 열어주십시오.");
 }

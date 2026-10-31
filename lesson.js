@@ -142,14 +142,16 @@ const LESSON_PROMPT = [
   '  "new_words": [{"es":"","ko":"","example":{"es":"","ko":""},',
   '                 "times":[{"when":"지금","es":"","ko":""}],"en":"","en_say":""}],',
   '  "words":     [{"es":"","ko":"","note":"","en":"","en_say":""}],',
-  '  "idioms":    [{"es":"","ko":"","from":"","note":"","en":"","en_say":""}],',
-  '  "sentences": [{"es":"","ko":"","fun":"","words":[{"es":"","ko":"","why":"","tip":""}],',
-  '                 "chunks":[{"es":"","ko":"","note":"","en":"","en_say":"",',
-  '                 "times":[{"when":"지금","es":"","ko":""}]}]}],',
-  '  "frames":    [{"type":"frame","es":"","ko":"","note":"","en":"","en_say":"",',
+  '  "idioms":    [{"es":"","ko":"","from":"","literal":"","why":"","note":"",',
+  '                 "examples":[{"es":"","ko":""}],"en":"","en_say":""}],',
+  '  "sentences": [{"es":"","ko":"","order":"","fun":"","words":[{"es":"","ko":"","why":"","tip":""}],',
+  '                 "chunks":[{"es":"","ko":"","literal":"","note":"","en":"","en_say":"",',
+  '                 "times":[{"when":"지금","es":"","ko":""}]}],',
+  '                 "swaps":[{"es":"","ko":"","what":""}]}],',
+  '  "frames":    [{"type":"frame","es":"","ko":"","literal":"","why":"","note":"","en":"","en_say":"",',
   '                 "today":{"es":"","ko":""},"swaps":[{"es":"","ko":""}],',
   '                 "forms":[{"who":"나","es":"","ko":""}]}],',
-  '  "grammar":   {"explain":[""],"rule":"","examples":[{"es":"","ko":""}],',
+  '  "grammar":   {"explain":[""],"literal":"","rule":"","examples":[{"es":"","ko":""}],',
   '                "table":[{"label":"","es":"","ko":""}],"en":"","en_say":"","quiz":[{"ko":"","es":""}]},',
   '  "pronoun":   {"points":[{"es":"","ko":"","who":"","what":""}],"quiz":[{"ko":"","es":""}]},',
   '  "outro": ""',
@@ -177,9 +179,12 @@ const LESSON_PROMPT = [
   "",
   "grammar — teach grammar_step, following its core and how, for a complete beginner.",
   "  explain: 2 or 3 short Korean sentences a child could follow. Show, do not name.",
+  "  literal: OPTIONAL, ONE short Korean line reading the key form word by word, so the",
+  "    learner sees why it is built this way (voy a comer → ‘나는 간다 + 먹으러’ 라서 ‘먹을 거야’).",
   "  rule: the whole point in ONE short Korean line.",
   "  examples: 4 to 6 short, correct Mexican Spanish sentences that show the point, using",
-  "    today's words and new_words where natural, each with its Korean.",
+  "    today's words and new_words where natural, each with its Korean. The first three are",
+  "    tiny everyday ones of at most 5 words.",
   "  table: OPTIONAL, 2 to 6 rows, only when a small table helps (persons, now/already/going-to,",
   "    endings). label is a short Korean tag: 나, 너, 그(당신), 우리, 그들 / 지금, 이미, 앞으로 / 그것을 …",
   "  en / en_say: OPTIONAL, one short English phrase that works the same way (I gave it to him).",
@@ -209,9 +214,18 @@ const LESSON_PROMPT = [
   "    is real and common, leave it out. Returning 2 is better than inventing a 4th.",
   "  - from: the es of the word above that it branches from, exactly.",
   "  - note: one short Korean line on when it is used. Korean only — no Spanish inside it.",
+  "  - literal: what the words say one by one, in Korean (meter la pata → ‘다리를 넣다’).",
+  "  - why: ONE short Korean line on why it came to mean that (엉뚱한 데 발을 넣는 모습이라 ‘실수’).",
+  "  - examples: 2 or 3 very easy everyday sentences of at most 5 words using it, each with",
+  "    its Korean, built on today's words and new_words where they fit.",
   "",
   "sentences — 2 to 4 sentences from today worth memorising, copied EXACTLY as they appear.",
+  "  The point of this part is that the learner UNDERSTANDS why the sentence looks the way it",
+  "  does. It is taught in this order: meaning → word order → each word → chunks → swaps.",
   "  ko: the Korean meaning.",
+  "  order: ONE short Korean line on how the Spanish order differs from the Korean, the pieces",
+  "    in «» in their own order, e.g. 스페인어는 «놓아 줘 - 그 밥을 - 큰 그릇에», 한국어는",
+  "    «밥을 큰 그릇에 놓아 줘». Name the pieces in Korean. If the order is the same, say so.",
   "  words: EVERY word of the sentence, in order, articles and little words included (el, de,",
   "    en, y, al, que …). A word that comes twice in the sentence is listed once. A pair that",
   "    always goes together (por favor, a lo mejor) may be one item.",
@@ -220,7 +234,8 @@ const LESSON_PROMPT = [
   "    why: WHY it has this shape, in plain Korean a child could follow, at most 3 short",
   "      sentences: the basic word it comes from (pon 은 poner(놓다)에서 왔어요), who / when /",
   "      how many changed its ending (친구한테 시킬 때 / 이미 끝난 일이라서 / 여럿이라서),",
-  "      what a glued lo, la, se or me means (끝에 붙은 lo 는 ‘그것을’), why el or la",
+  "      what a glued lo, la, se or me stands for AND why it sits there (끝에 붙은 lo 는",
+  "      ‘그것을’ — 시키는 말에서는 끝에 붙어요, 보통 말에서는 앞에 따로: lo meto), why el or la",
   "      (남자 쪽 말이라 el). A little word gets ONE sentence. Never just repeat ko.",
   "    tip: OPTIONAL one short memory hook — a Korean sound-alike, a pun, a picture",
   "      (pon → ‘폰 내려놓듯 놓아 줘’). Leave it empty when it would be forced. At most",
@@ -231,8 +246,12 @@ const LESSON_PROMPT = [
   "  chunks: 2 to 5 pieces, in the order they appear in the Spanish, together covering the",
   "    sentence. Each chunk is a unit: a verb phrase, a set expression (an idiom inside the",
   "    sentence is its own chunk), a noun with its article, a question opener.",
-  "  chunks[].note: usually empty now that words explain each word; otherwise ONE short line",
-  "    in Korean that a child could follow, about THIS chunk.",
+  "  chunks[].literal: OPTIONAL, only for a chunk whose words travel together as a set (por",
+  "    favor, a lo mejor, al cerrar, hay que): what the words say one by one, in Korean",
+  "    (por favor → ‘호의를 위해’). Leave it empty for an ordinary piece.",
+  "  chunks[].note: usually empty now that words explain each word; for a chunk with a",
+  "    literal, ONE short line on why these words go together and what they really mean;",
+  "    otherwise ONE short line in Korean that a child could follow, about THIS chunk.",
   "    Good: al + 동작을 나타내는 말 은 '~할 때' 라는 뜻이에요 /",
   "          pon 은 poner(놓다)로 '놓아 줘' 하고 부탁할 때 쓰는 모양이에요 /",
   "          pedí 는 이미 끝난 일을 말할 때 모양이에요",
@@ -244,6 +263,15 @@ const LESSON_PROMPT = [
   '     {"when":"이미","es":"pedí","ko":"나는 주문했어"},',
   '     {"when":"앞으로","es":"voy a pedir","ko":"나는 주문할 거야"}]',
   "    when is exactly 지금, 이미 or 앞으로. Use 나 as the person unless the chunk needs another.",
+  "  swaps: 2 or 3 tiny variations of THIS sentence, each changing exactly ONE thing so the",
+  "    learner hears what that one change does. Pick the changes that fit the sentence: the",
+  "    person (pon → pongo), the time (pon → puse / voy a poner), or the thing turned into",
+  "    lo/la (mete el arroz → mételo).",
+  "    es: only the piece that changed and a word or two around it — at most 6 words — built",
+  "      ONLY from this sentence's own words in another form. No new name, number or place.",
+  "    ko: its Korean.",
+  "    what: ONE short Korean line: what was changed and what it now means",
+  "      (pon → pongo: ‘내가 놓아’ 로 바뀌어요).",
   "",
   "frames — 3 to 6 items: the BONES of speaking. Two kinds:",
   '  type "link": a connecting word that glues sentences together',
@@ -256,11 +284,14 @@ const LESSON_PROMPT = [
   '  es: only the fixed words, no placeholder and no Korean ("voy a", "creo que", "pero").',
   "  ko: what it means, with ~ where the swapped part goes (나는 ~할 거야).",
   "  note: OPTIONAL one child-simple Korean line on when people say it.",
+  "  literal: OPTIONAL, what the fixed words say one by one, in Korean (voy a → ‘나는 간다 ~로’,",
+  "    hay que → ‘~할 것이 있다’). Empty for a single word.",
+  "  why: OPTIONAL one short Korean line on why it ends up meaning that.",
   "  today: the sentence (or the part of it) from today's data that uses it, copied EXACTLY,",
   "    with its Korean. If none of today's sentences has it, leave today empty — never write",
   "    a made-up sentence in today.",
-  "  swaps: 2 or 3 new short examples: the same frame with a different verb or noun, using",
-  "    today's words where they fit (voy a moler el chile / voy a freír la calabaza).",
+  "  swaps: 2 or 3 new short examples of at most 5 words: the same frame with a different verb",
+  "    or noun, using today's words where they fit (voy a moler el chile / voy a freír la calabaza).",
   '  forms: REQUIRED when es starts with a verb (voy a, quiero, tengo que, puedo, creo que...):',
   "    the frame with ONE example verb for each person, in this order, who exactly as written:",
   '    [{"who":"나","es":"voy a comer","ko":"나는 먹을 거야"},',
@@ -291,8 +322,9 @@ const LESSON_PROMPT = [
   "",
   "HARD RULES",
   "- Never introduce a Spanish word, name, number, price, time or place that is not in the data.",
-  "  The exceptions are idioms (only expressions you are certain of), the swaps, forms and",
-  "  times of a frame or chunk, and everything in new_words, grammar and pronoun — and those",
+  "  The exceptions are idioms and their examples (only expressions you are certain of), the",
+  "  swaps, forms and times of a frame or chunk, a sentence's swaps (its own words in another",
+  "  form), and everything in new_words, grammar and pronoun — and those",
   "  must be plain, correct, everyday Spanish built on today's words where possible.",
   "  today is never an exception: it is always a real quote.",
   "- Every Korean line is plain, short and meant to be heard out loud. No markdown, no brackets",
@@ -401,6 +433,8 @@ function cleanFrames(list, sources){
     out.push(Object.assign({
       type: o.type === "link" ? "link" : "frame",
       es: es, ko: ko, note: cleanStr(o.note),
+      literal: koLine(o.literal, null, LITERAL_CHARS),
+      why: firstSentences(koLine(o.why, null, IDIOM_WHY_CHARS), 1, IDIOM_WHY_CHARS),
       today: today, swaps: swaps,
       forms: o.type === "link" ? [] : cleanTable(o.forms, "who", WHO_MAP, WHO_ORDER)
     }, cleanEn(o)));
@@ -479,6 +513,7 @@ function cleanGrammar(raw, ban){
   const quiz = (Array.isArray(o.quiz) ? o.quiz : []).map(cleanPair).filter(Boolean).slice(0, 2);
   const g = Object.assign({
     explain: explain, rule: banScrub(o.rule, ban), examples: examples,
+    literal: koLine(o.literal, ban, ORDER_CHARS),
     table: cleanLabelTable(o.table), quiz: quiz
   }, cleanEn(o));
   return g.explain.length || g.rule || g.examples.length || g.quiz.length ? g : null;
@@ -537,6 +572,60 @@ function cleanFun(v, ban){
   return s && s.length <= FUN_CHARS && /[가-힣]/.test(s) ? s : "";
 }
 
+/* «why this shape» extras: the word order line, a literal reading, the
+   one-change swaps and an idiom's easy examples. Each is optional and each is
+   checked on its own, so a broken one is dropped and the rest stands. */
+const ORDER_CHARS = 160, LITERAL_CHARS = 60, WHAT_CHARS = 90, IDIOM_WHY_CHARS = 120;
+const SWAP_WORDS = 8, EXAMPLE_WORDS = 7, MAX_SWAPS = 3, MAX_EXAMPLES = 3;
+/* a Korean line of bounded length, banned words scrubbed */
+function koLine(v, ban, cap){
+  const s = banScrub(v, ban);
+  return s && s.length <= cap && /[가-힣]/.test(s) ? s : "";
+}
+const wordCount = (s) => String(s || "").split(/\s+/).filter(Boolean).length;
+/* a number in an example that the source never had is a made-up fact */
+const digitsOf = (s) => (String(s || "").match(/\d+/g) || []);
+function noNewNumbers(es, src){
+  const have = new Set(digitsOf(src));
+  return digitsOf(es).every((d) => have.has(d));
+}
+function cleanSwaps(list, sentEs, ban){
+  const out = [], seen = new Set([foldEs(sentEs)]);
+  for (const x of (Array.isArray(list) ? list : [])){
+    const p = cleanPair(x);
+    if (!p || /[가-힣]/.test(p.es) || !/[가-힣]/.test(p.ko)) continue;
+    if (wordCount(p.es) > SWAP_WORDS || !noNewNumbers(p.es, sentEs)) continue;
+    const k = foldEs(p.es);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push({ es: p.es, ko: p.ko, what: koLine(x && x.what, ban, WHAT_CHARS) });
+    if (out.length >= MAX_SWAPS) break;
+  }
+  return out;
+}
+function cleanExamples(list, src){
+  const out = [], seen = new Set();
+  for (const x of (Array.isArray(list) ? list : [])){
+    const p = cleanPair(x);
+    if (!p || /[가-힣]/.test(p.es) || wordCount(p.es) > EXAMPLE_WORDS || !noNewNumbers(p.es, src)) continue;
+    const k = foldEs(p.es);
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(p);
+    if (out.length >= MAX_EXAMPLES) break;
+  }
+  return out;
+}
+/* spoken: arrows, quote marks and ~ are for the eye */
+function sayWhy(s){
+  return String(s || "").replace(/\s*[→↔]\s*/g, ", ").replace(/[«»‘’“”]/g, "")
+    .replace(/\s*~\s*/g, " ").replace(/\s+/g, " ").trim();
+}
+/* spoken: the «» and the dashes are for the eye */
+function sayOrder(s){
+  return sayWhy(String(s || "").replace(/[«»]/g, "").replace(/\s+-\s+/g, ", "));
+}
+
 /* The reply was cut off: keep everything up to the last value that closed,
    and close what was still open. Only used once a retry has failed too. */
 function lessonSalvageJson(text){
@@ -575,6 +664,7 @@ function lessonNormalise(raw, sourceEs, cur){
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("대본 형식이 올바르지 않습니다.");
   const sources = Array.isArray(sourceEs) ? sourceEs.map(quoteKey) : null;
   const silent = Array.isArray(sourceEs) && sourceEs.length === 0;
+  const srcAll = Array.isArray(sourceEs) ? sourceEs.join(" ") : "";
   const ban = { used: false };
   const note = (v) => banScrub(v, ban);
 
@@ -595,7 +685,10 @@ function lessonNormalise(raw, sourceEs, cur){
   const idioms = (silent ? [] : Array.isArray(raw.idioms) ? raw.idioms : [])
     .map((x) => Object.assign({
       es: cleanStr(x && x.es), ko: cleanStr(x && x.ko),
-      from: cleanStr(x && x.from), note: note(x && x.note)
+      from: cleanStr(x && x.from), note: note(x && x.note),
+      literal: koLine(x && x.literal, ban, LITERAL_CHARS),
+      why: firstSentences(koLine(x && x.why, ban, IDIOM_WHY_CHARS), 1, IDIOM_WHY_CHARS),
+      examples: cleanExamples(x && x.examples, srcAll)
     }, cleanEn(x)))
     .filter((x) => x.es && x.ko)
     .slice(0, 5);
@@ -605,11 +698,14 @@ function lessonNormalise(raw, sourceEs, cur){
   const sentences = (silent ? [] : Array.isArray(raw.sentences) ? raw.sentences : [])
     .map((s) => ({
       es: cleanStr(s && s.es), ko: cleanStr(s && s.ko),
+      order: koLine(s && s.order, ban, ORDER_CHARS),
       words: cleanSentWords(s && s.words, cleanStr(s && s.es), ban),
       fun: cleanFun(s && s.fun, ban),
+      swaps: cleanSwaps(s && s.swaps, cleanStr(s && s.es), ban),
       chunks: (Array.isArray(s && s.chunks) ? s.chunks : [])
         .map((c) => Object.assign({
           es: cleanStr(c && c.es), ko: cleanStr(c && c.ko), note: note(c && c.note),
+          literal: koLine(c && c.literal, ban, LITERAL_CHARS),
           times: cleanTable(c && c.times, "when", WHEN_MAP, WHEN_ORDER)
         }, cleanEn(c)))
         .filter((c) => c.es && c.ko)
@@ -1402,6 +1498,42 @@ function lessonBuild(content, when, prev, cur, trim){
     const gg = row(sec, "en", { en: item.en });
     seg(sec, gg, "ko", "영어로는 " + say + withKo(say) + " 비슷해요.", P.en);
   }
+  /* «why this shape»: what the words say one by one, then why it means what it
+     means — each line only when the model wrote one */
+  function whyBlock(sec, literal, why){
+    if (literal){
+      const gg = row(sec, "note", { ko: "글자 그대로: " + literal });
+      seg(sec, gg, "ko", "글자 그대로는 " + sayWhy(literal).replace(/[.。]\s*$/, "") + ".", P.note);
+    }
+    if (why){
+      const gg = row(sec, "note", { ko: why });
+      seg(sec, gg, "ko", sayWhy(why), P.note);
+    }
+  }
+  /* a few very easy examples: Spanish, then Korean */
+  function exampleRows(sec, list, max, lead){
+    const xs = (Array.isArray(list) ? list : []).slice(0, Math.max(0, max));
+    xs.forEach((x, k) => {
+      const gg = row(sec, "pair", { es: x.es, ko: x.ko, badge: "예문" });
+      if (k === 0 && lead) seg(sec, gg, "ko", lead, P.lead);
+      seg(sec, gg, "es", x.es, P.frameEs);
+      seg(sec, gg, "ko", x.ko, P.frameKo);
+    });
+  }
+  /* 4교시 ⑤: one thing changed at a time, and what that change did */
+  function swapRows(sec, list, max){
+    const xs = (Array.isArray(list) ? list : []).slice(0, Math.max(0, max));
+    xs.forEach((x, k) => {
+      const gg = row(sec, "pair", { es: x.es, ko: x.ko, badge: "바꿔 끼우기" });
+      if (k === 0) seg(sec, gg, "ko", "한 군데만 바꿔 볼게요. 뜻이 어떻게 달라지는지 들어 보세요.", P.lead);
+      seg(sec, gg, "es", x.es, P.frameEs);
+      seg(sec, gg, "ko", x.ko, P.frameKo);
+      if (x.what){
+        const gw = row(sec, "note", { ko: "↔ " + x.what });
+        seg(sec, gw, "ko", sayWhy(x.what), P.note);
+      }
+    });
+  }
   /* a small table on screen; aloud, every line Spanish then Korean */
   function tableRow(sec, cap, capSay, table){
     const gg = row(sec, "table", { ko: cap, table: table });
@@ -1580,7 +1712,12 @@ function lessonBuild(content, when, prev, cur, trim){
       seg(SEC.idioms, g, "es", x.es, P.wordEs);
       seg(SEC.idioms, g, "ko", x.ko, k === n - 1 ? P.wordKoLast : P.wordKo);
     }
-    if (n > 1){ enLine(SEC.idioms, x); teach("i", x.es); }
+    if (n > 1){
+      enLine(SEC.idioms, x);
+      whyBlock(SEC.idioms, x.literal, x.why);
+      exampleRows(SEC.idioms, x.examples, trim ? 1 + (trim < 2 ? 1 : 0) : 3, "쉬운 예문으로 들어 볼게요.");
+      teach("i", x.es);
+    }
   });
   knownGroup(SEC.idioms, "idioms", idiomsKnown);
 
@@ -1631,6 +1768,30 @@ function lessonBuild(content, when, prev, cur, trim){
     }
   }
 
+  /* 4교시 ④: a set of words that go together — what they say one by one, and
+     what they really mean. A chunk the words above already read out as one
+     item is not read again; only its literal line is added. */
+  const CHUNK_WHY_MAX = 2;
+  function chunkWhy(s){
+    let n = 0;
+    for (const c of (Array.isArray(s.chunks) ? s.chunks : [])){
+      if (!c.literal || n >= CHUNK_WHY_MAX) continue;
+      n++;
+      if (!wordsSeen.has(foldEs(c.es))){
+        g = row(SEC.sents, "pair", { es: c.es, ko: c.ko, badge: "덩어리" });
+        seg(SEC.sents, g, "es", c.es, P.oneEs);
+        seg(SEC.sents, g, "ko", plain(c.ko), P.oneMean);
+      }
+      g = row(SEC.sents, "note", { ko: "글자 그대로: " + c.literal + " → 실제로는 " + c.ko });
+      seg(SEC.sents, g, "ko", "글자 그대로는 " + sayWhy(c.literal).replace(/[.。]\s*$/, "") +
+          ", 실제로는 " + plain(c.ko) + ".", P.why);
+      if (c.note){
+        g = row(SEC.sents, "note", { ko: c.note });
+        seg(SEC.sents, g, "ko", sayWhy(c.note), P.why);
+      }
+    }
+  }
+
   content.sentences.forEach((s, i) => {
     const words = Array.isArray(s.words) ? s.words : [];
     /* seen on a recent day, or quizzed in 0교시 a few minutes ago: the core only */
@@ -1657,8 +1818,17 @@ function lessonBuild(content, when, prev, cur, trim){
     g = row(SEC.sents, "say", { ko: s.ko });
     seg(SEC.sents, g, "ko", s.ko, P.sentMean);
 
+    /* ② how the order differs from Korean */
+    if (s.order && !short){
+      g = row(SEC.sents, "note", { ko: "🔀 " + s.order });
+      seg(SEC.sents, g, "ko", "순서를 볼게요. " + sayOrder(s.order), P.why);
+    }
+
     if (words.length){
+      /* ③ word by word */
       sentWords(s, i, short);
+      /* ④ the pieces that travel together: what they say, what they mean */
+      if (!short && trim < 2) chunkWhy(s);
       /* the verb tables of its chunks stay: now / already / going-to side by side */
       if (!short) for (const c of s.chunks){
         if (c.times && c.times.length){
@@ -1666,6 +1836,8 @@ function lessonBuild(content, when, prev, cur, trim){
             "지금, 이미 끝난 일, 앞으로 할 일로 나란히 들어 볼게요.", c.times);
         }
       }
+      /* ⑤ one change at a time */
+      if (!short) swapRows(SEC.sents, s.swaps, trim ? 2 : MAX_SWAPS);
       if (s.fun && !short){
         g = row(SEC.sents, "say", { ko: "🇲🇽 " + s.fun });
         seg(SEC.sents, g, "ko", pickSay(FUN_SAY, dn + i) + plain(s.fun), P.note);
@@ -1698,6 +1870,7 @@ function lessonBuild(content, when, prev, cur, trim){
           "지금, 이미 끝난 일, 앞으로 할 일로 나란히 들어 볼게요.", c.times);
       }
     });
+    swapRows(SEC.sents, s.swaps, trim ? 2 : MAX_SWAPS);
 
     g = row(SEC.sents, "full", { es: s.es, ko: s.ko, badge: "×2" });
     seg(SEC.sents, g, "es", s.es, P.full);
@@ -1730,6 +1903,7 @@ function lessonBuild(content, when, prev, cur, trim){
       g = row(SEC.grammar, "say", { ko: line });
       seg(SEC.grammar, g, "ko", sayKo(line), P.note);
     }
+    if (gc && gc.literal) whyBlock(SEC.grammar, gc.literal, "");
     const rule = (gc && gc.rule) || step.rule;
     g = row(SEC.grammar, "note", { ko: "규칙: " + rule });
     seg(SEC.grammar, g, "ko", "규칙 한 줄. " + sayKo(rule), P.sentMean);
@@ -1806,6 +1980,7 @@ function lessonBuild(content, when, prev, cur, trim){
     seg(SEC.frames, g, "ko", sayKo(f.ko), P.frameKo);
     seg(SEC.frames, g, "es", f.es, P.frameEs);
     enLine(SEC.frames, f);
+    if (trim < 2) whyBlock(SEC.frames, f.literal, f.why);
 
     if (f.today){
       g = row(SEC.frames, "pair", { es: f.today.es, ko: f.today.ko, badge: "오늘 문장" });
@@ -2026,10 +2201,12 @@ function ttsError(status, msg){
   else if (status === 403 && /disabled|has not been used|SERVICE_DISABLED/i.test(msg))
     head = "이 키의 프로젝트에서 Cloud Text-to-Speech API 가 켜져 있지 않습니다.\n" +
            "구글 클라우드 콘솔에서 Text-to-Speech API 를 사용 설정하십시오.\n\n";
+  else if (status === 403 && /billing/i.test(msg))
+    head = "Cloud TTS 키가 막혔습니다 — 그 프로젝트의 결제가 꺼져 있습니다. console.cloud.google.com → 결제(Billing)에서 결제 계정을 연결하십시오.\n\n";
   else if (status === 403)
-    head = "Cloud TTS 키에 권한이 없습니다. 이 API 는 결제 계정을 연결해야 동작합니다.\n\n";
+    head = "Cloud TTS 키에 권한이 없습니다 (키 제한 또는 결제 미연결). console.cloud.google.com 에서 키의 API 제한과 결제를 확인하십시오.\n\n";
   else if (status === 429)
-    head = "Cloud TTS 한도에 걸렸습니다. 잠시 뒤 다시 시도하십시오.\n\n";
+    head = "Cloud TTS 키가 잠시 막혔습니다 — 요청 한도(할당량)에 걸렸습니다. 잠시 뒤 다시 하시거나 console.cloud.google.com 의 할당량을 확인하십시오. 기기 목소리로 바꿔도 됩니다.\n\n";
   return new Error(head + "TTS " + status + "\n" + msg);
 }
 
@@ -3199,6 +3376,8 @@ const ASK_PROMPT = [
   "  question — what they asked. If it says the question is in the attached audio,",
   "             listen to the audio: that is the question. They speak Korean and may",
   "             drop Spanish words into it.",
+  "  spoken   — true when question is an automatic speech-to-text transcript: a Spanish",
+  "             word in it may be misheard as Korean that sounds alike; read it that way.",
   "  lesson   — every line of today's lesson: part (교시), es, ko, and for a grammar",
   "             note grammar:true. This is the material they are studying.",
   "  playing  — the line on screen when they asked. May be null.",
@@ -3371,7 +3550,10 @@ function askHistoryJson(){
 
 function askContextJson(pending){
   return JSON.stringify({
-    question: pending.via === "voice" ? "(in the attached audio)" : pending.q,
+    /* a spoken question is either the audio itself (Gemini) or what the
+       browser's speech recognition wrote down (Claude) */
+    question: pending.via === "voice" && (pending.audio || !pending.q) ? "(in the attached audio)" : pending.q,
+    spoken: pending.via === "voice" && !pending.audio && pending.q ? true : undefined,
     lesson: askLessonJson(),
     playing: pending.playing || null,
     history: askHistoryJson()
@@ -3406,6 +3588,8 @@ function askParse(text){
 /* "idle" | "rec" | "think" */
 function askLock(state){
   const q = $("lQ"), mic = $("lQMic"), send = $("lQSend");
+  /* words the speech recognition showed while listening are not left in the box */
+  if (q && state === "idle" && q.dataset && q.dataset.stt){ q.value = ""; delete q.dataset.stt; }
   if (q) q.disabled = state !== "idle";
   if (send) send.disabled = state !== "idle";
   if (mic){
@@ -3679,7 +3863,7 @@ async function askAsk(pending){
 
     const got = askParse(reply);
     const shown = askPending.via === "voice"
-      ? (got.heard || "🎤 음성 질문")
+      ? (askPending.q ? "🎤 " + askPending.q : (got.heard || "🎤 음성 질문"))
       : askPending.q;
 
     if (!current.qa) current.qa = [];
@@ -3718,9 +3902,12 @@ function askSend(){
 /* No Gemini key, so nothing can hear a spoken question. With only a Claude key
    that is said in the panel, instead of opening a settings screen that looks
    as if nothing were set up. */
+/* a spoken question can be heard by Gemini, or written down by the browser's
+   speech recognition for Claude (useStt in app.js) */
+function canHearAsk(){ return !!settings.apiKey || useStt(); }
 function askNoVoiceKey(){
   if (settings.claudeKey){
-    askVoiceError("음성 질문은 Gemini 키가 필요합니다. 글로 물어보시거나 설정에서 Gemini 키를 넣으십시오.",
+    askVoiceError("이 브라우저는 받아쓰기(음성 인식)를 지원하지 않아 음성 질문은 Gemini 키가 필요합니다. 글로 물어보시거나 설정에서 Gemini 키를 넣으십시오.",
                   lessonAskTag());
     return;
   }
@@ -3739,7 +3926,7 @@ async function askMic(){
   }
   if (askOccupied()) return;
   if (busy) return;
-  if (!settings.apiKey){ askNoVoiceKey(); return; }
+  if (!canHearAsk()){ askNoVoiceKey(); return; }
   if (player){ try { player.pause(); } catch (e) {} }
 
   askRecording = true;
@@ -3784,6 +3971,27 @@ async function lessonAskAudio(b64, mime, ms, tag){
   if (!askTagValid(tag)){ askLock("idle"); return; }
   await askAsk({ q: "", via: "voice", audio: { data: b64, mime: mime, ms: ms } });
 }
+/* Claude first: the question arrives as the words the browser's speech
+   recognition wrote down, through the same screen gate as a recording */
+async function lessonAskText(text, tag){
+  askRecording = false;
+  askConverting = false;
+  const q = $("lQ");
+  if (q && q.dataset && q.dataset.stt){ q.value = ""; delete q.dataset.stt; }
+  if (!askTagValid(tag)){ askLock("idle"); return; }
+  await askAsk({ q: String(text || "").trim(), via: "voice" });
+}
+/* while listening, what has been heard so far shows in the question box */
+function lessonAskPreview(text){
+  const q = $("lQ");
+  if (!q) return;
+  if (!text){
+    if (q.dataset && q.dataset.stt){ q.value = ""; delete q.dataset.stt; }
+    return;
+  }
+  q.value = text;
+  if (q.dataset) q.dataset.stt = "1";
+}
 function askVoiceError(msg, tag){
   askRecording = false;
   askConverting = false;
@@ -3805,8 +4013,8 @@ function lessonAskFailed(msg, tag){ askVoiceError(msg || "녹음을 보내지 �
 let lessonOpening = false;
 
 async function openLesson(force){
-  /* a silently dead button reads as broken, so say why */
-  if (recording){ setStatus("말이 끝난 뒤에 눌러주십시오"); return; }
+  /* a silently dead button reads as broken, so say why (stt: still writing down) */
+  if (recording || stt){ setStatus("말이 끝난 뒤에 눌러주십시오"); return; }
   if (busy || lessonOpening){ setStatus("아직 하던 일이 끝나지 않았습니다"); return; }
   lessonOpening = true;
   try {
@@ -3841,7 +4049,7 @@ let lessonShelfOpening = false;
 async function openSavedLesson(){
   /* a lesson is being made: show that screen again, and leave the run alone */
   if (lessonMaking){ openDlg($("lesson")); return; }
-  if (recording){ setStatus("말이 끝난 뒤에 눌러주십시오"); return; }
+  if (recording || stt){ setStatus("말이 끝난 뒤에 눌러주십시오"); return; }
   if (busy || lessonOpening || lessonShelfOpening){ setStatus("아직 하던 일이 끝나지 않았습니다"); return; }
   lessonShelfOpening = true;
   try {

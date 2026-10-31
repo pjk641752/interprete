@@ -140,6 +140,25 @@
   #mic.rec{background:linear-gradient(160deg,#ef4444,#dc2626);animation:pulse 1.3s infinite}
   #mic.busy{background:linear-gradient(160deg,#6b7280,#4b5563);box-shadow:none}
   @keyframes pulse{0%{box-shadow:0 0 0 0 rgba(239,68,68,.55)}70%{box-shadow:0 0 0 20px rgba(239,68,68,0)}100%{box-shadow:0 0 0 0 rgba(239,68,68,0)}}
+  #mic[hidden]{display:none}
+  /* Claude first: speech recognition needs to know the language, so two buttons */
+  .mic-pair{display:flex;gap:10px;width:100%;max-width:420px}
+  .mic-pair[hidden]{display:none}
+  .mic2{flex:1;height:64px;border-radius:18px;border:none;color:#fff;font-size:15.5px;font-weight:700;
+    cursor:pointer;font-family:inherit;background:linear-gradient(160deg,#3b82f6,#2563eb);
+    box-shadow:0 6px 18px rgba(37,99,235,.3);transition:transform .12s ease,background .2s ease}
+  .mic2#micEs{background:linear-gradient(160deg,#10b981,#059669);box-shadow:0 6px 18px rgba(5,150,105,.3)}
+  .mic2:active{transform:scale(.96)}
+  .mic2.rec{background:linear-gradient(160deg,#ef4444,#dc2626);animation:pulse 1.3s infinite}
+  .mic2.busy,.mic2:disabled{background:linear-gradient(160deg,#6b7280,#4b5563);box-shadow:none}
+  .stt-live{max-width:420px;font-size:14px;line-height:1.5;color:var(--text);text-align:center;word-break:break-word}
+  .stt-live[hidden]{display:none}
+  p.heard{margin:6px 0 0;font-size:11.5px;color:var(--dim);line-height:1.45}
+  .ai-badge{font-size:10.5px;font-weight:700;border-radius:6px;padding:2px 6px;margin-left:8px;
+    border:1px solid var(--line);color:var(--dim);vertical-align:2px}
+  .ai-badge[hidden]{display:none}
+  .ai-badge.claude{color:#f0b38a;border-color:rgba(240,179,138,.4)}
+  .ai-badge.gemini{color:#9cc3ff;border-color:rgba(156,195,255,.4)}
 
   dialog{border:1px solid var(--line);background:var(--surface);color:var(--text);border-radius:var(--radius);padding:0;width:min(460px,93vw);max-height:88vh}
   dialog::backdrop{background:rgba(0,0,0,.68)}
@@ -269,6 +288,7 @@
 
 <header>
   <span class="brand">통역기</span>
+  <span class="ai-badge" id="aiBadge" hidden title="마지막으로 답한 AI"></span>
   <span class="spacer"></span>
   <button class="icon-btn lesson" id="openLesson" type="button" aria-label="오늘의 오디오 수업">🎧</button>
   <button class="icon-btn lesson shelf" id="openShelf" type="button" aria-label="저장된 수업 듣기">📚 수업</button>
@@ -296,8 +316,13 @@
     <button id="textSend" type="button" aria-label="글 번역">↵</button>
   </div>
   <div class="level"><i id="lvl"></i></div>
+  <div class="stt-live" id="sttLive" hidden></div>
   <div id="status">준비됨 — 버튼을 누르고 말하십시오</div>
   <button id="mic" type="button" aria-label="녹음">🎙</button>
+  <div class="mic-pair" id="micPair" hidden>
+    <button class="mic2" id="micKo" type="button" aria-label="한국어로 말하기">🇰🇷 내가 말하기</button>
+    <button class="mic2" id="micEs" type="button" aria-label="스페인어 듣기">🇲🇽 상대 말 듣기</button>
+  </div>
 </footer>
 
 <dialog id="settings">
@@ -322,10 +347,18 @@
       <button class="mini" id="claudeTest" type="button">실제 호출 시험</button>
     </div>
     <div class="note" id="claudeMsg"></div>
+    <label for="aiOrder">AI 우선 순서</label>
+    <select id="aiOrder">
+      <option value="claude">Claude 먼저 (기본 — Claude 키가 있을 때)</option>
+      <option value="gemini">Gemini 먼저</option>
+    </select>
     <div class="note">
-      넣으면 <b>수업 대본 만들기</b>와 수업 중 <b>글로 쓴 질문</b>은 Claude 가 맡습니다.
-      통역·💬 요약·<b>음성 질문</b>은 지금처럼 Gemini 가 합니다(Claude 는 음성을 듣지 못합니다).
-      Claude 가 실패하면 Gemini 로 저절로 다시 합니다. 키 발급: <b>platform.claude.com</b>.
+      Claude 먼저면 <b>통역(글·말)·💬 요약·수업 대본·수업 질문</b>을 모두 Claude 가 먼저 맡습니다.
+      Claude 는 소리를 듣지 못하므로, 말은 <b>브라우저 받아쓰기</b>가 글자로 바꿔 보냅니다 —
+      그래서 마이크가 <b>«🇰🇷 내가 말하기» / «🇲🇽 상대 말 듣기»</b> 두 개로 나뉩니다.
+      받아쓰기가 안 되는 브라우저에서는 말만 Gemini 녹음으로 합니다.
+      한쪽이 실패하면 다른 쪽 키로 저절로 다시 하고, 둘 다 실패하면 어느 키가 왜 막혔는지 보여 드립니다.
+      화면 위 작은 표시가 마지막으로 답한 AI 입니다. 키 발급: <b>platform.claude.com</b>.
       «확인» 은 형식만 보고 요금이 들지 않습니다. «실제 호출 시험» 은 아주 짧은 요청 한 번이 청구됩니다.
     </div>
 
