@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-11-04.1";
+const APP_VERSION = "2026-11-04.2";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -510,18 +510,9 @@ function geminiWhy(status, msg){
     return "Gemini 서버가 잠시 응답하지 않습니다. 잠시 뒤 다시 하십시오.";
   return "";
 }
-/* The key itself is what stopped it (spending cap, quota, bad or refused key),
-   so trying again with the same key will not help. A server hiccup, a wrong
-   model name or a dropped connection is not this. */
-function geminiKeyBlocked(status, msg){
-  if (status === 429 || status === 401 || status === 403) return true;
-  return status === 400 && /API key not valid|API_KEY_INVALID|api[ _-]?key|location is not supported|user location/i.test(String(msg || ""));
-}
 function apiError(status, msg, model){
   const why = geminiWhy(status, msg);
-  const e = new Error((why ? why + "\n\n" : "") + "API " + status + " (" + model + ")\n" + msg);
-  e.keyBlocked = geminiKeyBlocked(status, msg);
-  return e;
+  return new Error((why ? why + "\n\n" : "") + "API " + status + " (" + model + ")\n" + msg);
 }
 
 /* Pull one JSON object out of each SSE "data:" line. */
@@ -896,22 +887,10 @@ function sttCtor(){
 function sttSupported(){ return !sttBroken && typeof sttCtor() === "function"; }
 function useStt(){ return claudeFirst() && sttSupported(); }
 
-/* Gemini's key was refused on a recording this session. Memory only: a reload
-   or saved keys try the single microphone again. */
-let geminiVoiceDown = false;
-
-function canRecord(){
-  return !!(navigator.mediaDevices && navigator.mediaDevices.getUserMedia && window.MediaRecorder);
-}
-/* Recognition has to be told the language before it listens, so it needs one
-   button per language; a recording goes to Gemini, which works the language
-   out itself, so one button is enough. Two buttons only when recognition is
-   the way speech can reach an AI at all. */
-function pairMode(){
-  return useStt() && (!settings.apiKey || !canRecord() || geminiVoiceDown);
-}
+/* Two buttons when speech goes through recognition, the one microphone
+   otherwise. Gemini mode is exactly the old screen. */
 function refreshMicUi(){
-  const two = pairMode();
+  const two = useStt();
   if (el.micPair) el.micPair.hidden = !two;
   el.mic.hidden = two && !!el.micPair;
 }
@@ -1122,9 +1101,7 @@ function sttFinish(s){
   if (!text){
     resetMic();
     let why = sttErrorText(s.error);
-    /* only when a working recorder is there to take over; otherwise recognition
-       stays on offer, since a network error may pass */
-    if (STT_FATAL.test(s.error) && settings.apiKey && canRecord() && !geminiVoiceDown){
+    if (STT_FATAL.test(s.error) && settings.apiKey){
       sttBroken = true;
       refreshMicUi();
       why += " 녹음 방식(Gemini)으로 바꿨습니다 — 다시 눌러 주십시오.";
@@ -1155,16 +1132,9 @@ window.addEventListener("pagehide", () => { if (stt) sttAbort(stt); });
    button said which language is about to be spoken. */
 async function startRecording(target, lang){
   if (busy || recording || stt) return;
-  /* Speech through recognition: no recording, no microphone stream, no
-     AudioContext of ours — see startStt. A lesson question is one microphone in
-     Korean answered by Claude, so it takes recognition whenever there is any;
-     interpreting takes it only when the two buttons are showing. */
-  if (target === "ask"){
-    if (useStt()){ startStt("ask", "ko"); return; }
-  } else if (pairMode()){
-    startStt(target, lang === "es" ? "es" : "ko");
-    return;
-  }
+  /* Claude first and the browser can write speech down: no recording, no
+     microphone stream, no AudioContext of ours — see startStt */
+  if (useStt()){ startStt(target, target === "ask" ? "ko" : (lang === "es" ? "es" : "ko")); return; }
   if (!settings.apiKey){
     if (settings.claudeKey) showError("이 브라우저는 받아쓰기(음성 인식)를 지원하지 않아 말은 Gemini 키로만 통역됩니다. 글로 쓰시거나 설정에서 Gemini 키를 넣으십시오.");
     else openSettings();
@@ -1379,14 +1349,7 @@ async function runInterpret(src, audioMs){
       setStatus(shown + (elapsed / 1000).toFixed(1) + "초 · " + out.model);
     }
   } catch (e) {
-    let msg = (e && e.message) ? e.message : String(e);
-    /* the key will refuse the next recording too: speech goes the other way */
-    if (src.kind === "audio" && e && e.keyBlocked && useStt()){
-      geminiVoiceDown = true;
-      refreshMicUi();
-      msg += "\n\n그래서 버튼을 둘로 바꿨습니다(휴대폰 받아쓰기 + Claude) — 다시 말씀해 주십시오.";
-    }
-    showError(msg);
+    showError((e && e.message) ? e.message : String(e));
     setStatus("실패했습니다");
   } finally {
     busy = false;
@@ -1962,7 +1925,6 @@ el.saveSettings.onclick = () => {
   closeDlg(el.settings);
   showError("");
   refreshMeter();
-  geminiVoiceDown = false;
   refreshMicUi();
   setStatus(hasAnyKey() ? "준비됨 — 버튼을 누르고 말하십시오" : "API 키를 먼저 넣어주십시오");
 };
@@ -2104,7 +2066,6 @@ function importKeys(keys){
   if (!ok) return false;
   applyKeys(keys);
   refreshMeter();
-  geminiVoiceDown = false;
   refreshMicUi();
   if (el.settings.open) openSettings();          // the dialog shows the new values
   setStatus(settings.apiKey ? "키를 넣었습니다 — 준비됨" : "키를 넣었습니다");
@@ -2190,7 +2151,7 @@ el.resetUsage.onclick = () => {
 };
 
 el.mic.onclick = () => { if (busy) return; recording ? stopRecording() : startRecording("interpret"); };
-/* two buttons (pairMode): the button says which language is about to be spoken */
+/* Claude first: the button says which language is about to be spoken */
 const pairTap = (lang) => () => {
   if (busy) return;
   if (stt || recording){ stopRecording(); return; }
