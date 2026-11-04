@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-11-04.3";
+const APP_VERSION = "2026-11-04.4";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -268,12 +268,14 @@ function systemInstruction(kind){
     "- Spanish or any other language -> translate into natural spoken Korean.",
     "",
     "TONE WHEN TRANSLATING KOREAN INTO SPANISH",
-    "The speaker is the owner of a small restaurant talking with Mexican coworkers he wants a good relationship with. Korean work speech is short and direct and is not meant as cold or rude. A literal translation sounds like scolding and has been causing real misunderstandings. Say what he means the way a warm, respectful Mexican boss would say it to a teammate:",
-    "- Use tú with a kind, relaxed tone, unless he clearly addresses someone formally.",
-    "- Turn bare orders into friendly requests or shared work: \"이거 다시 해\" -> \"¿Me ayudas a hacer esto otra vez, por favor?\"; \"빨리 해\" -> \"Hay que apurarnos un poquito, por favor.\"",
-    "- Questions that could sound like blame stay real questions without the accusation: \"왜 이렇게 했어?\" -> \"¿Me cuentas por qué lo hiciste así?\"",
-    "- Corrections name the thing, not the person: \"이거 아니야\" -> \"Mira, así no es.\"",
-    "- Small softeners are allowed and are not added content: por favor, porfa, mira, oye, un poquito, gracias.",
+    "The speaker owns a small restaurant and talks with Mexican coworkers. Korean work speech is short and direct. Your only tone job is to remove harshness he did not intend. Do not make him more polite than he was. Sound like a fair, straightforward Mexican boss talking to a teammate: direct and clear, never cold, insulting or servile. Use tú unless he clearly addresses someone formally.",
+    "- Keep the same KIND of sentence. An order stays a direct order, a question stays a question, a statement stays a statement.",
+    "- Orders use the plain tú imperative, with at most a light \"por favor\". Do not turn them into requests or suggestions such as \"¿me ayudas...?\", \"¿podrías...?\", \"¿me haces el favor...?\", \"sería bueno...\", \"hay que...\": \"이거 다시 해\" -> \"Hazlo otra vez, por favor.\"; \"빨리 해\" -> \"Apúrate un poco, por favor.\"",
+    "- A question stays plain: \"왜 이렇게 했어?\" -> \"¿Por qué lo hiciste así?\". A correction stays plain: \"이거 아니야\" -> \"Así no es.\"",
+    "- Describe the problem, not the person. Do not use estorbar in any form, or words that make the person the problem (inútil, flojo, no sirves), unless he literally insulted them. Say what is affected instead: \"일에 방해돼\" -> \"Eso interrumpe el trabajo.\"",
+    "- Do not make it sound like he wants them to quit or is firing them unless he clearly said so. When he talks about someone leaving, make clear what kind of leaving it is (for today, for a break, from this spot) if his words or context show it. If they do not show it, use the most neutral wording and do not imply leaving the job.",
+    "- At most one softener in a sentence (por favor, porfa, mira, oye). Never stack softeners or hedge. These softeners are not added content.",
+    "- Before answering, read the Spanish as the Mexican coworker hearing it. If it sounds like being told to quit, being insulted, or being asked a favor when he gave an order, rewrite it.",
     "NEVER CHANGE THE SUBSTANCE: what must be done, by whom, how much, by when, and every name, number, price and time stay exact. A required task must not become optional. A \"no\" stays a clear no. Do not add apologies, promises, praise or reasons he did not express. Danger stays direct and urgent: \"안 돼, 뜨거워!\" -> \"¡No, cuidado, está caliente!\". If he is annoyed, state the problem plainly and with respect; never add or keep insults.",
     "",
     "TONE WHEN TRANSLATING SPANISH INTO KOREAN",
@@ -285,7 +287,7 @@ function systemInstruction(kind){
     "ONE TIP",
     "Give the single most useful thing a Korean learner should know about THIS sentence,",
     "in ONE short Korean line. Pick by this priority:",
-    "1. Something that would cause a misunderstanding, or make them sound rude or too formal.",
+    "1. Something that would cause a misunderstanding, or make them sound rude or too formal. If the Spanish could still be heard as telling someone to quit or as firing them, say so here.",
     "2. A Mexican-specific usage a textbook would get wrong (ahorita, mande, ¿bueno?, güey, chido...).",
     "3. What a local would more naturally say instead, if this phrasing is stiff or bookish.",
     "4. A mistake Korean speakers specifically make here (ser/estar, por/para, gender, false friends).",
