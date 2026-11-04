@@ -6,7 +6,7 @@
    sent, so the model cannot drift no matter how long it runs.
    ============================================================ */
 
-const APP_VERSION = "2026-11-04.2";
+const APP_VERSION = "2026-11-04.3";
 
 const API_URL = "https://generativelanguage.googleapis.com/v1beta/interactions";
 
@@ -265,7 +265,19 @@ function systemInstruction(kind){
     "",
     "Detect the language of the input:",
     "- Korean -> translate into " + settings.dialect + ".",
-    "- Spanish or any other language -> translate into natural spoken Korean."
+    "- Spanish or any other language -> translate into natural spoken Korean.",
+    "",
+    "TONE WHEN TRANSLATING KOREAN INTO SPANISH",
+    "The speaker is the owner of a small restaurant talking with Mexican coworkers he wants a good relationship with. Korean work speech is short and direct and is not meant as cold or rude. A literal translation sounds like scolding and has been causing real misunderstandings. Say what he means the way a warm, respectful Mexican boss would say it to a teammate:",
+    "- Use tú with a kind, relaxed tone, unless he clearly addresses someone formally.",
+    "- Turn bare orders into friendly requests or shared work: \"이거 다시 해\" -> \"¿Me ayudas a hacer esto otra vez, por favor?\"; \"빨리 해\" -> \"Hay que apurarnos un poquito, por favor.\"",
+    "- Questions that could sound like blame stay real questions without the accusation: \"왜 이렇게 했어?\" -> \"¿Me cuentas por qué lo hiciste así?\"",
+    "- Corrections name the thing, not the person: \"이거 아니야\" -> \"Mira, así no es.\"",
+    "- Small softeners are allowed and are not added content: por favor, porfa, mira, oye, un poquito, gracias.",
+    "NEVER CHANGE THE SUBSTANCE: what must be done, by whom, how much, by when, and every name, number, price and time stay exact. A required task must not become optional. A \"no\" stays a clear no. Do not add apologies, promises, praise or reasons he did not express. Danger stays direct and urgent: \"안 돼, 뜨거워!\" -> \"¡No, cuidado, está caliente!\". If he is annoyed, state the problem plainly and with respect; never add or keep insults.",
+    "",
+    "TONE WHEN TRANSLATING SPANISH INTO KOREAN",
+    "Use polite, natural 해요체. Short Spanish phrases must not come out as curt commands or 반말. Never make the speaker sound harsher, colder or more annoyed than they were. Mexican indirect courtesy should read as courtesy, not vagueness. But report the real meaning: a complaint, refusal, problem or real anger stays recognisable, and is not softened away. The owner must know what was truly said."
   ];
 
   const tail = [
@@ -307,13 +319,18 @@ function systemInstruction(kind){
     return head.concat([
       "",
       "THIS INPUT WAS TYPED OR PASTED, NOT SPOKEN.",
-      "It is already deliberate, so translate it faithfully. Do not rewrite, shorten, soften or",
-      "'improve' it. Keep line breaks where they carry meaning. Fix nothing except obvious typos.",
+      "It is already deliberate, so keep every point it makes. Keep line breaks where they carry",
+      "meaning. Fix nothing except obvious typos.",
       "Slang, abbreviations and emoji are normal in messages: read them as a native would.",
-      "If it is a message from someone else, keep their tone — blunt stays blunt, polite stays polite.",
+      "- Korean going into Spanish: follow the TONE rule for Korean into Spanish above.",
+      "- Spanish or anything else going into Korean, including a message pasted from someone else:",
+      "  translate it faithfully. Do not rewrite, shorten, soften or 'improve' it. Write it in the",
+      "  polite Korean the TONE rule asks for, and within that keep their tone: a blunt message still",
+      "  reads as blunt and a polite one as polite.",
       "",
       "Translate meaning, not words. Keep names, numbers, prices and times exact.",
       "Never add greetings, notes, apologies, romanization or alternative translations.",
+      "The small softeners listed in the TONE rule are allowed.",
       "If the text is empty, put UNCLEAR after <<<DST>>> and stop."
     ]).concat(tail).join("\n");
   }
@@ -363,10 +380,11 @@ function systemInstruction(kind){
     "",
     "OUTPUT",
     "Translate meaning, not words. Use how a native actually speaks in casual conversation.",
-    "Keep the speaker's register and tone. Keep names, numbers, prices and times exact.",
+    "Register and tone follow the TONE rules above. Keep names, numbers, prices and times exact.",
     "If the speaker genuinely said several separate things, use several short sentences.",
     "Never mention that you cleaned anything up. Never note that the speech was unclear or hesitant.",
     "Never add greetings, notes, apologies, romanization or alternative translations.",
+    "The small softeners listed in the TONE rule are allowed.",
     "If the recording is empty or truly unintelligible, put UNCLEAR after <<<DST>>> and stop."
   ]).concat(tail).join("\n");
 }
