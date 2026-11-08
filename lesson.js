@@ -77,21 +77,6 @@ const P = {
   section: 1.0                 // added on top, at a section boundary
 };
 
-const SEC = {
-  intro:  { id: "intro",  title: "시작" },
-  yday:   { id: "yday",   title: "0교시 · 어제 복습" },     // the date is added per lesson
-  /* the ids stay what they were: 0교시 reads yesterday's rows by sectionId */
-  newwords: { id: "newwords", title: "1교시 · 오늘의 새 단어" },
-  words: { id: "words",  title: "2교시 · 대화 단어" },
-  idioms: { id: "idioms", title: "3교시 · 연계 숙어" },
-  sents:  { id: "sents",  title: "4교시 · 문장 해부" },
-  grammar: { id: "grammar", title: "5교시 · 문법 한 칸" },
-  pron:   { id: "pron",   title: "6교시 · lo·le·se 연습" },
-  frames: { id: "frames", title: "7교시 · 말의 뼈대" },
-  review: { id: "review", title: "마무리 복습" },
-  outro:  { id: "outro",  title: "마무리" }
-};
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const cleanStr = (v) => (typeof v === "string" ? v.trim() : "");
 
@@ -110,227 +95,140 @@ function ordKo(n){
   return s + " 번째";
 }
 
-/* ---------------- lesson content from Gemini ---------------- */
+/* ---------------- lesson content from the AI ----------------
+   One call writes the material of a 20-minute, five-part audio lesson; the
+   app builds the timeline (parts, repetitions, silences to answer in, sound
+   cues) in code — see lessonBuild. */
 
 const LESSON_PROMPT = [
-  "You are writing the content of a spoken Spanish lesson for a Korean speaker living in",
-  "Mexico, a complete beginner. Below is one JSON object:",
+  "You are a Spanish instructional designer with ten years of experience building lively, immersive",
+  "audio lessons. You write the MATERIAL of one 20-minute audio lesson. The learner is a Korean who",
+  "runs a Korean restaurant in Mexico, a complete beginner, who listens in the car and on the phone",
+  "and is expected to ANSWER OUT LOUD. The app builds the timeline in code — the five parts, the",
+  "repetitions, the silences to answer in, the sound cues. You choose and write what goes in.",
+  "",
+  "Input: one JSON object:",
   "  today        — everything they interpreted today: es (Spanish), ko (Korean), an optional",
   "                 tip, and the study chunks they already saw. It may be EMPTY.",
-  "  new_words    — today's new words for the beginner, chosen by the app (may be empty).",
+  "  new_words    — up to ten queued words for the beginner, in course order (may be empty).",
   "  grammar_step — today's grammar topic: title, core (what to teach), how (how to explain it).",
   "  pronoun_hits — today's Spanish lines where the app spotted lo/la/le/se/me/te (may be empty).",
-  "  recent       — what earlier lessons of the last few days already taught in full: idioms,",
-  "                 frames, words, sentences, pronoun lines (may be empty). The learner hears",
-  "                 the same kitchen every day; repeating yesterday is the main way a lesson",
-  "                 gets boring.",
+  "  recent       — what lessons of the last few days already taught: idioms, frames, words",
+  "                 (expressions), sentences, pronoun lines (may be empty).",
   "",
-  "AVOID REPEATS — use recent:",
-  "- idioms: never pick one listed in recent.idioms. Fewer idioms is fine.",
-  "- frames: prefer ones not in recent.frames. One that IS in today's sentences may stay, but",
-  "  then write new swaps, not the old ones.",
-  "- words: list the words not in recent.words first; a recent one only if it really matters",
-  "  today (the app reads a recent one once, briefly).",
-  "- pronoun: do not reuse a line from recent.pronoun in the quiz.",
-  "- sentences: prefer today's sentences that are not in recent.sentences.",
-  "- The time a recent item no longer takes goes to new ones: when much of today is in recent,",
-  "  give more NEW words (up to 14) and one more new sentence rather than recent ones.",
+  "THE FIVE PARTS (the app times them; you fill them):",
+  "  1 warm-up, 0-3 min: a 3-second speed quiz on the last lesson (the app makes it from that",
+  "    lesson), then today's situation thrown at the learner (situation.setup).",
+  "  2 cheat code 1, 3-8 min: today's grammar_step as ONE plain 'cheat code' (cheat.hook), then the",
+  "    target expressions drilled three times in rhythm, each with a short example.",
+  "  3 cheat code 2, 8-14 min: a short role-play — something goes wrong and the learner talks their",
+  "    way out of it — built from the targets, the frames and the idiom.",
+  "  4 one-second challenge, 14-18 min: a Korean situation, the learner answers in Spanish at once.",
+  "  5 cool-down, 18-20 min: one take-away sentence and a small real-life mission.",
+  "",
+  "CHOOSE AND FOCUS. A list of twenty words read out loses a listener in the car. Pick FEW things",
+  "and use each of them many times inside one storyline.",
+  "- The storyline: ONE situation taken from today's actual conversations (what was going on, who",
+  "  was talking, what went wrong or was asked for). The restaurant kitchen when it fits — it",
+  "  usually does — otherwise today's real context. If today is empty, use the restaurant kitchen.",
+  "- It is a role-play the learner imagines ('오늘 여러분은 … 입니다'). Never state facts about the",
+  "  learner's real life, staff, customers or money that are not in today's data.",
+  "",
+  "AVOID REPEATS — use recent: never pick an idiom listed in recent.idioms; prefer targets and frames",
+  "not in recent.words / recent.frames; do not reuse a recent.pronoun line. A part of today's talk",
+  "that was taught recently can still be the setting — teach something new inside it.",
   "",
   "Return ONE JSON object and nothing else. No markdown, no code fence, no commentary.",
   "",
   "{",
-  '  "new_words": [{"es":"","ko":"","example":{"es":"","ko":""},',
-  '                 "times":[{"when":"지금","es":"","ko":""}],"en":"","en_say":""}],',
-  '  "words":     [{"es":"","ko":"","note":"","en":"","en_say":""}],',
-  '  "idioms":    [{"es":"","ko":"","from":"","literal":"","why":"","note":"",',
-  '                 "examples":[{"es":"","ko":""}],"en":"","en_say":""}],',
-  '  "sentences": [{"es":"","ko":"","order":"","fun":"","words":[{"es":"","ko":"","why":"","tip":""}],',
-  '                 "chunks":[{"es":"","ko":"","literal":"","note":"","en":"","en_say":"",',
-  '                 "times":[{"when":"지금","es":"","ko":""}]}],',
-  '                 "swaps":[{"es":"","ko":"","what":""}]}],',
-  '  "frames":    [{"type":"frame","es":"","ko":"","literal":"","why":"","note":"","en":"","en_say":"",',
-  '                 "today":{"es":"","ko":""},"swaps":[{"es":"","ko":""}],',
-  '                 "forms":[{"who":"나","es":"","ko":""}]}],',
-  '  "grammar":   {"explain":[""],"literal":"","rule":"","examples":[{"es":"","ko":""}],',
-  '                "table":[{"label":"","es":"","ko":""}],"en":"","en_say":"","quiz":[{"ko":"","es":""}]},',
-  '  "pronoun":   {"points":[{"es":"","ko":"","who":"","what":""}],"quiz":[{"ko":"","es":""}]},',
+  '  "situation": {"setup":""},',
+  '  "targets":   [{"es":"","ko":"","base":"","base_ko":"","how":"","example":{"es":"","ko":""},"gesture":""}],',
+  '  "cheat":     {"hook":"","explain":[""],"examples":[{"es":"","ko":""}]},',
+  '  "frames":    [{"es":"","ko":"","note":""}],',
+  '  "story":     {"title":"","setup":"","lines":[{"who":"","es":"","ko":"","learner":false,"gesture":""}]},',
+  '  "idiom":     {"es":"","ko":"","literal":"","why":"","example":{"es":"","ko":""}},',
+  '  "new_words_used": [{"es":"","form":"","ko":""}],',
+  '  "challenge": [{"ko":"","es":""}],',
+  '  "pronoun":   {"quiz":[{"ko":"","es":""}]},',
+  '  "takeaway":  {"es":"","ko":""},',
+  '  "mission": "",',
   '  "outro": ""',
   "}",
   "",
-  "If today is empty, return words, idioms, sentences and frames as empty arrays and write",
-  "everything else as usual.",
+  "situation.setup — 1 or 2 short Korean sentences that drop the learner into the scene, with",
+  "  energy: 오늘 여러분은 멕시코 식당 주방의 신입 요리사입니다! 사장님 지시도 받고, 손님 불만도 막아야 해요.",
   "",
-  "new_words — exactly one item per entry of the input new_words, same order, es copied EXACTLY.",
-  "  ko: the plain Korean meaning, short (a verb as ~하다, a word ending in -se as 자기 ~하다",
-  "    only if that is how Koreans say it, e.g. bañarse 씻다, 목욕하다).",
-  "  example: ONE very easy sentence of at most 7 words using the word, about everyday life",
-  "    (a shop, the street, home, friends, work in general), in plain Mexican Spanish, with its",
-  "    Korean.",
-  "  times: ONLY when the word is a verb: the same verb with 나 — now / already done / going to:",
-  '    [{"when":"지금","es":"como","ko":"나는 먹어"},',
-  '     {"when":"이미","es":"comí","ko":"나는 먹었어"},',
-  '     {"when":"앞으로","es":"voy a comer","ko":"나는 먹을 거야"}]',
-  "    For a word ending in -se use me: me baño / me bañé / me voy a bañar. Otherwise leave it empty.",
-  "  Mexico first: when a word has a second meaning a beginner in Mexico will meet, put both in",
-  "    ko, short (camión 트럭, 버스 / cuarto 방, 4분의 1 / llave 열쇠, 수도꼭지 / despedir 배웅하다,",
-  "    해고하다 / almuerzo 늦은 아침 — 직장 점심은 la comida). caliente is for food and things only:",
-  "    a hot person says tengo calor. Food words (huevo, leche, chile, plátano, pepino) are used",
-  "    only in their food meaning — never build a double-meaning phrase with them.",
+  "targets — 3 to 5 short expressions, the heart of the lesson, at most 5 words each, said the way",
+  "  a Mexican says them (¡Ábrelo! / ¡Ciérralo! / ¡Dámelo! / Es que no puedo.). Show today's",
+  "  grammar_step in them where it fits; take them from today's talk where you can.",
+  "  ko: the plain Korean meaning (그거 열어!).",
+  "  base / base_ko: OPTIONAL, the plain dictionary word it is built from and its meaning",
+  "    (abrir / 열다). Empty when there is none.",
+  "  how: ONE short Korean line a child could follow on how base became es — the 'trick'",
+  "    (abre 끝에 ‘그거’ lo 를 붙이면 ábrelo). No grammar terms.",
+  "  example: ONE very easy sentence of at most 7 words using it, from the storyline, with Korean.",
+  "  gesture: OPTIONAL, a tiny hand gesture to do while saying it, in Korean (문 여는 손짓). It is",
+  "    shown on screen only, never read aloud.",
   "",
-  "grammar — teach grammar_step, following its core and how, for a complete beginner.",
-  "  explain: 2 or 3 short Korean sentences a child could follow. Show, do not name.",
-  "  literal: OPTIONAL, ONE short Korean line reading the key form word by word, so the",
-  "    learner sees why it is built this way (voy a comer → ‘나는 간다 + 먹으러’ 라서 ‘먹을 거야’).",
-  "  rule: the whole point in ONE short Korean line.",
-  "  examples: 4 to 6 short, correct Mexican Spanish sentences that show the point, using",
-  "    today's words and new_words where natural, each with its Korean. The first three are",
-  "    tiny everyday ones of at most 5 words.",
-  "  table: OPTIONAL, 2 to 6 rows, only when a small table helps (persons, now/already/going-to,",
-  "    endings). label is a short Korean tag: 나, 너, 그(당신), 우리, 그들 / 지금, 이미, 앞으로 / 그것을 …",
-  "  en / en_say: OPTIONAL, one short English phrase that works the same way (I gave it to him).",
-  "  quiz: exactly 2: a short Korean sentence and its Spanish answer, using today's point.",
+  "cheat — today's grammar_step, following its core and how.",
+  "  hook: the cheat code in ONE short Korean line (말 끝에 ‘그거’ lo 만 붙이면 명령!).",
+  "  explain: 1 or 2 short Korean sentences a child could follow. Show, do not name.",
+  "  examples: 1 or 2 tiny correct Mexican Spanish sentences of at most 5 words, with Korean.",
   "",
-  "pronoun — a two-minute drill on the little words lo, la, los, las, le, les, se, me, te.",
-  "  points: 1 to 3. Prefer real lines from pronoun_hits, copied EXACTLY (the whole line or the",
-  "    part that carries the little word). Skip a hit that is not really one of them — la or los",
-  "    in front of a noun means 'the' and is not one. If no real hit is left, write 1 or 2 plain",
-  "    everyday examples instead.",
-  "    who: to whom, in plain Korean (그에게, 나에게, 자기 자신에게), or empty.",
-  "    what: what, in plain Korean (그것을, 밥을), or empty.",
-  "  quiz: exactly 3: a short Korean request or sentence and its Spanish, each using one of",
-  "    these little words (그에게 그것을 줘 → Dáselo).",
+  "frames — 1 or 2 bones of speaking used INSIDE the story: Por eso (그래서), Es que (그게 실은,",
+  "  핑계 댈 때), Voy a (나 ~할 거야), Creo que, Tengo que … es: only the fixed words, no placeholder.",
+  "  ko: the meaning with ~ where the rest goes. note: OPTIONAL one Korean line on when it is used.",
+  "  A frame that no story line uses is thrown away by the app.",
   "",
-  "words — 6 to 12 items: the Spanish worth memorising from today, most useful first.",
-  "  es: the word or short chunk exactly as it appeared today. Never invent one.",
-  "  ko: the plain dictionary meaning in Korean, short.",
-  "  note: OPTIONAL one short Korean line, and only when there is something real to say —",
-  "    an origin worth knowing (refri 는 refrigerador 를 줄인 말입니다), a Mexico-only usage,",
-  "    a gender trap, a false friend. Otherwise leave it empty. Never restate the meaning.",
-  "    An obvious or filler note is worse than no note.",
+  "story — the role-play, 10 to 14 lines in two short scenes: something goes wrong (a complaint, a",
+  "  mistake, a missing thing), then the learner's role talks their way out and fixes it.",
+  "  title: a short Korean title. setup: one Korean line.",
+  "  lines[].who: the speaker in Korean, short (손님, 사장님, 요리사, 직원). lines[].es: at most 12",
+  "  words, natural Mexican Spanish; the learner's lines use the targets and the frames many times.",
+  "  lines[].ko: its Korean. lines[].learner: true for the lines the learner says (their role),",
+  "  5 to 7 of them. lines[].gesture: OPTIONAL, shown on screen only.",
   "",
-  "idioms — 2 to 4 set expressions that BRANCH OFF the words above",
-  "  (fuego -> a fuego lento, meter -> meter la pata, moler -> no me muelas).",
-  "  - Only expressions genuinely in daily use in Mexico. If you are not certain an expression",
-  "    is real and common, leave it out. Returning 2 is better than inventing a 4th.",
-  "  - from: the es of the word above that it branches from, exactly.",
-  "  - note: one short Korean line on when it is used. Korean only — no Spanish inside it.",
-  "  - literal: what the words say one by one, in Korean (meter la pata → ‘다리를 넣다’).",
-  "  - why: ONE short Korean line on why it came to mean that (엉뚱한 데 발을 넣는 모습이라 ‘실수’).",
-  "  - examples: 2 or 3 very easy everyday sentences of at most 5 words using it, each with",
-  "    its Korean, built on today's words and new_words where they fit.",
+  "idiom — ONE set expression genuinely in daily use in Mexico that fits the story (estar en su salsa",
+  "  = 물 만난 물고기, cambiar de idea = 생각을 바꾸다), ideally one heard today. Only one you are",
+  "  certain of; else null. Never one listed in recent.idioms. literal: the words one by one in",
+  "  Korean. why: ONE short Korean line on why it means that. example: at most 7 words, with Korean.",
   "",
-  "sentences — 2 to 4 sentences from today worth memorising, copied EXACTLY as they appear.",
-  "  The point of this part is that the learner UNDERSTANDS why the sentence looks the way it",
-  "  does. It is taught in this order: meaning → word order → each word → chunks → swaps.",
-  "  ko: the Korean meaning.",
-  "  order: ONE short Korean line on how the Spanish order differs from the Korean, the pieces",
-  "    in «» in their own order, e.g. 스페인어는 «놓아 줘 - 그 밥을 - 큰 그릇에», 한국어는",
-  "    «밥을 큰 그릇에 놓아 줘». Name the pieces in Korean. If the order is the same, say so.",
-  "  words: EVERY word of the sentence, in order, articles and little words included (el, de,",
-  "    en, y, al, que …). A word that comes twice in the sentence is listed once. A pair that",
-  "    always goes together (por favor, a lo mejor) may be one item.",
-  "    es: the word exactly as written in the sentence, glued lo/la/se/me kept (mételo, dáselo).",
-  "    ko: its plain Korean meaning here, short.",
-  "    why: WHY it has this shape, in plain Korean a child could follow, at most 3 short",
-  "      sentences: the basic word it comes from (pon 은 poner(놓다)에서 왔어요), who / when /",
-  "      how many changed its ending (친구한테 시킬 때 / 이미 끝난 일이라서 / 여럿이라서),",
-  "      what a glued lo, la, se or me stands for AND why it sits there (끝에 붙은 lo 는",
-  "      ‘그것을’ — 시키는 말에서는 끝에 붙어요, 보통 말에서는 앞에 따로: lo meto), why el or la",
-  "      (남자 쪽 말이라 el). A little word gets ONE sentence. Never just repeat ko.",
-  "    tip: OPTIONAL one short memory hook — a Korean sound-alike, a pun, a picture",
-  "      (pon → ‘폰 내려놓듯 놓아 줘’). Leave it empty when it would be forced. At most",
-  "      one tip in three words.",
-  "    For a word in recent.words, why is one short sentence.",
-  "  fun: OPTIONAL one short Korean line: how people in Mexico really use this sentence or a",
-  "    word in it — a nuance, a local way to say it. Only what you are sure of; else empty.",
-  "  chunks: 2 to 5 pieces, in the order they appear in the Spanish, together covering the",
-  "    sentence. Each chunk is a unit: a verb phrase, a set expression (an idiom inside the",
-  "    sentence is its own chunk), a noun with its article, a question opener.",
-  "  chunks[].literal: OPTIONAL, only for a chunk whose words travel together as a set (por",
-  "    favor, a lo mejor, al cerrar, hay que): what the words say one by one, in Korean",
-  "    (por favor → ‘호의를 위해’). Leave it empty for an ordinary piece.",
-  "  chunks[].note: usually empty now that words explain each word; for a chunk with a",
-  "    literal, ONE short line on why these words go together and what they really mean;",
-  "    otherwise ONE short line in Korean that a child could follow, about THIS chunk.",
-  "    Good: al + 동작을 나타내는 말 은 '~할 때' 라는 뜻이에요 /",
-  "          pon 은 poner(놓다)로 '놓아 줘' 하고 부탁할 때 쓰는 모양이에요 /",
-  "          pedí 는 이미 끝난 일을 말할 때 모양이에요",
-  "    Bad: anything that only re-translates the chunk, or any grammar term.",
-  "    If a chunk carries no grammar worth a line, leave note empty.",
-  "  chunks[].times: OPTIONAL, only for a chunk built on a verb, and in at most 3 chunks of",
-  "    the whole lesson. The same verb side by side: now / already done / going to —",
-  '    [{"when":"지금","es":"pido","ko":"나는 주문해"},',
-  '     {"when":"이미","es":"pedí","ko":"나는 주문했어"},',
-  '     {"when":"앞으로","es":"voy a pedir","ko":"나는 주문할 거야"}]',
-  "    when is exactly 지금, 이미 or 앞으로. Use 나 as the person unless the chunk needs another.",
-  "  swaps: 2 or 3 tiny variations of THIS sentence, each changing exactly ONE thing so the",
-  "    learner hears what that one change does. Pick the changes that fit the sentence: the",
-  "    person (pon → pongo), the time (pon → puse / voy a poner), or the thing turned into",
-  "    lo/la (mete el arroz → mételo).",
-  "    es: only the piece that changed and a word or two around it — at most 6 words — built",
-  "      ONLY from this sentence's own words in another form. No new name, number or place.",
-  "    ko: its Korean.",
-  "    what: ONE short Korean line: what was changed and what it now means",
-  "      (pon → pongo: ‘내가 놓아’ 로 바뀌어요).",
+  "new_words_used — from the input new_words ONLY, the ones the story or the targets really use,",
+  "  0 to 4, earlier ones first. es: copied EXACTLY from new_words. form: the exact form as it",
+  "  appears in your story or targets (mide for medir). ko: plain Korean meaning. Do not force a",
+  "  word in; unused ones simply wait for another day.",
   "",
-  "frames — 3 to 6 items: the BONES of speaking. Two kinds:",
-  '  type "link": a connecting word that glues sentences together',
-  "    (pero 그런데 / entonces 그러니까 / que ~라는 것 / pues 음, 그럼 / porque 왜냐하면 / así que 그래서).",
-  '  type "frame": a fixed opening you keep and only swap the verb or noun after it',
-  "    (creo que … 나는 ~라고 생각해 / quiero + 동작 / voy a + 동작 / parece que … /",
-  "     tengo que + 동작 / puedo + 동작 / dicen que … / hay que + 동작).",
-  "  Take the ones that are IN today's sentences first. Only if fewer than 3 are there, add basic",
-  "  ones that fit naturally onto today's sentences.",
-  '  es: only the fixed words, no placeholder and no Korean ("voy a", "creo que", "pero").',
-  "  ko: what it means, with ~ where the swapped part goes (나는 ~할 거야).",
-  "  note: OPTIONAL one child-simple Korean line on when people say it.",
-  "  literal: OPTIONAL, what the fixed words say one by one, in Korean (voy a → ‘나는 간다 ~로’,",
-  "    hay que → ‘~할 것이 있다’). Empty for a single word.",
-  "  why: OPTIONAL one short Korean line on why it ends up meaning that.",
-  "  today: the sentence (or the part of it) from today's data that uses it, copied EXACTLY,",
-  "    with its Korean. If none of today's sentences has it, leave today empty — never write",
-  "    a made-up sentence in today.",
-  "  swaps: 2 or 3 new short examples of at most 5 words: the same frame with a different verb",
-  "    or noun, using today's words where they fit (voy a moler el chile / voy a freír la calabaza).",
-  '  forms: REQUIRED when es starts with a verb (voy a, quiero, tengo que, puedo, creo que...):',
-  "    the frame with ONE example verb for each person, in this order, who exactly as written:",
-  '    [{"who":"나","es":"voy a comer","ko":"나는 먹을 거야"},',
-  '     {"who":"너","es":"vas a comer","ko":"너는 먹을 거야"},',
-  '     {"who":"그(당신)","es":"va a comer","ko":"그는(당신은) 먹을 거야"},',
-  '     {"who":"우리","es":"vamos a comer","ko":"우리는 먹을 거야"}]',
-  '    For type "link" and for frames that do not change with the person (hay que, parece que),',
-  "    leave forms empty.",
+  "challenge — 10 to 12 one-second prompts: ko is a short Korean situation or order (창문 닫아! / 그거",
+  "  나 줘! / 그게 실은 못 해…), es the Spanish answer of at most 6 words (¡Ciérralo! / ¡Dámelo! /",
+  "  Es que no puedo.). Mostly the targets and frames in new situations.",
   "",
-  "en / en_say — on new_words, words, idioms, chunks, frames and grammar, OPTIONAL: the closest English, so a",
-  "  Korean who knows a little English gets it at once (creo que -> I think, a lo mejor -> maybe,",
-  "  entonces -> so, pero -> but, voy a -> I'm going to ~). en is the English, 1 to 4 words.",
-  "  en_say is how a Korean would write that English in Hangul (아이 띵크, 메이비, 아임 고잉 투).",
-  "  Only when the match is real and helps; an English word that is merely the translation",
-  "  of a plain noun (tazón -> bowl) is fine too, but leave both empty when nothing fits.",
+  "pronoun — the little words lo, la, le, se, me, te: 2 or 3 more quiz lines in the same style",
+  "  (그에게 그것을 줘 → Dáselo). Prefer real lines from pronoun_hits when they fit.",
   "",
-  "GRAMMAR, CHILD-SIMPLE — applies to every Korean line you write:",
+  "takeaway — the ONE sentence to take home, at most 8 words, from the story.",
+  "mission — ONE short, playful Korean line: a real moment today when to say it, even silently",
+  "  (오늘 냉장고 문 닫을 때 속으로 ‘¡Ciérralo!’ 외치기!). Under 70 characters.",
+  "outro — ONE short Korean closing line, under 50 characters.",
+  "",
+  "SPANISH: correct, natural Mexican Spanish. Mexico first: when a word has a second meaning a",
+  "  beginner in Mexico will meet, say so in ko, short (camión 트럭, 버스). caliente is for food and",
+  "  things only: a hot person says tengo calor. Food words (huevo, leche, chile, plátano, pepino)",
+  "  are used only in their food meaning — never in a double-meaning phrase. Written accents and ¡ ¿",
+  "  are kept (Ábrelo, Dámelo).",
+  "",
+  "KOREAN, CHILD-SIMPLE — every Korean line is plain, short and meant to be heard out loud:",
   "- Never use grammar terms: 과거분사, 현재분사, 접속법, 직설법, 재귀동사, 명령형, 부정사,",
   "  동사원형, 시제, 활용, 인칭, 목적격, 대명사, 전치사, 관사, 과거형, 미래형,",
   "  목적어, 주어, 동사, 명사, 형용사, 점과거, 불완료과거, 현재완료, 가정법.",
-  "  Say what it DOES instead: 이미 끝난 일을 말할 때 모양 / 앞으로 할 일 /",
-  "  바라는 마음일 때 que 뒤에서 모양이 살짝 바뀜 / 자기 몸에 하는 일일 때 붙는 me·te·se.",
+  "  Say what it DOES instead: 시킬 때 / 이미 끝난 일 / 앞으로 할 일 / 끝에 붙는 ‘그거’ lo.",
   "  If a term is truly unavoidable, put it once in brackets after the plain words.",
-  "- Prefer showing over naming: now / already / going-to side by side beats any rule.",
-  "",
-  "outro — ONE short Korean line closing the lesson, naming a concrete situation from today's",
-  "  data where they should try one of these tomorrow. Under 60 characters.",
+  "- 합쇼체 or friendly 해요체, no markdown, no brackets.",
   "",
   "HARD RULES",
-  "- Never introduce a Spanish word, name, number, price, time or place that is not in the data.",
-  "  The exceptions are idioms and their examples (only expressions you are certain of), the",
-  "  swaps, forms and times of a frame or chunk, a sentence's swaps (its own words in another",
-  "  form), and everything in new_words, grammar and pronoun — and those",
-  "  must be plain, correct, everyday Spanish built on today's words where possible.",
-  "  today is never an exception: it is always a real quote.",
-  "- Every Korean line is plain, short and meant to be heard out loud. No markdown, no brackets",
-  "  (the one exception: a bracketed term that grammar_step.how explicitly allows, once).",
-  "- Skip greetings, yes/no, bare numbers and anything with no learning in it.",
-  "- Merge duplicates. If the same phrase came up five times it appears once."
+  "- Never introduce a name, number, price, time or place that is not in today's data.",
+  "- Never state as fact anything about the learner, the staff or the customers that the data does",
+  "  not say. The story is a role-play, and is presented as one.",
+  "- Skip greetings, yes/no and anything with no learning in it as targets."
 ].join("\n");
 
 /* Pull the JSON out of a reply that may carry a fence or stray prose. */
@@ -342,53 +240,11 @@ function lessonExtractJson(text){
   return JSON.parse(s.slice(a, b + 1));
 }
 
-/* English beside a Spanish item: shown as a badge, said once by the Korean
-   voice. en must look like English and en_say like Hangul; anything else is
-   dropped rather than read out wrong. Without en_say the Korean voice reads
-   the English itself. */
-const EN_RE = /^[A-Za-z][A-Za-z '’~.,?!\/-]{0,39}$/;
-const EN_SAY_RE = /^[가-힣][가-힣 ~·',.-]{0,29}$/;
-function cleanEn(x){
-  const en = cleanStr(x && x.en);
-  if (!en || !EN_RE.test(en)) return { en: "", enSay: "" };
-  const say = cleanStr(x && x.en_say);
-  return { en: en, enSay: EN_SAY_RE.test(say) ? say : "" };
-}
-
 const asObj = (v) => (v && typeof v === "object" && !Array.isArray(v) ? v : null);
 function cleanPair(v){
   const o = asObj(v);
   const es = cleanStr(o && o.es), ko = cleanStr(o && o.ko);
   return es && ko ? { es: es, ko: ko } : null;
-}
-function cleanPairs(list, max){
-  return (Array.isArray(list) ? list : []).map(cleanPair).filter(Boolean).slice(0, max);
-}
-
-/* A small table — the persons of a frame, or now / already / going-to of a
-   verb. Rows are keyed by their label, kept in a fixed order, and a table of
-   fewer than two rows is no table at all. */
-const WHO_MAP = {
-  "나": "나", "yo": "나",
-  "너": "너", "tú": "너", "tu": "너",
-  "그": "그(당신)", "그(당신)": "그(당신)", "그/당신": "그(당신)", "당신": "그(당신)",
-  "그녀": "그(당신)", "él": "그(당신)", "el": "그(당신)", "usted": "그(당신)",
-  "우리": "우리", "nosotros": "우리"
-};
-const WHO_ORDER = ["나", "너", "그(당신)", "우리"];
-const WHEN_MAP = { "지금": "지금", "이미": "이미", "앞으로": "앞으로" };
-const WHEN_ORDER = ["지금", "이미", "앞으로"];
-function cleanTable(list, field, map, order){
-  const got = new Map();
-  for (const c of (Array.isArray(list) ? list : [])){
-    const o = asObj(c);
-    const key = map[cleanStr(o && o[field]).replace(/\s+/g, "").toLowerCase()];
-    const p = cleanPair(o);
-    if (!key || !p || got.has(key)) continue;
-    got.set(key, { who: key, es: p.es, ko: p.ko });
-  }
-  const out = order.filter((k) => got.has(k)).map((k) => got.get(k));
-  return out.length >= 2 ? out : [];
 }
 
 /* The frame itself is what gets spoken, so placeholders go: "voy a + 동사" and
@@ -397,50 +253,6 @@ function cleanTable(list, field, map, order){
 function cleanFrameEs(v){
   const s = cleanStr(v).replace(/\s*\+.*$/, "").replace(/…|\.{2,}|~/g, "").replace(/\s+/g, " ").trim();
   return /[가-힣]/.test(s) ? "" : s;
-}
-
-/* "today" must be a real quote. It is checked against what was actually
-   interpreted today, punctuation and case aside; a line that is not there is
-   not thrown away but no longer called today's — it becomes a made example. */
-function quoteKey(s){
-  return " " + String(s || "").toLowerCase().normalize("NFC")
-    .replace(/[¿¡.,!?;:"'«»“”()]/g, " ").replace(/\s+/g, " ").trim() + " ";
-}
-function isQuoted(es, sources){
-  if (!sources) return true;
-  const k = quoteKey(es);
-  return k.trim() !== "" && sources.some((s) => s.indexOf(k) >= 0);
-}
-
-const MAX_FRAMES = 6, MAX_TIMES = 3;
-
-function cleanFrames(list, sources){
-  const out = [], seen = new Set();
-  for (const f of (Array.isArray(list) ? list : [])){
-    const o = asObj(f);
-    if (!o) continue;
-    const es = cleanFrameEs(o.es), ko = cleanStr(o.ko);
-    if (!es || !ko || seen.has(es.toLowerCase())) continue;
-    let today = cleanPair(o.today);
-    let swaps = cleanPairs(o.swaps, 3);
-    if (today && !isQuoted(today.es, sources)){
-      swaps = [today].concat(swaps).slice(0, 3);
-      today = null;
-    }
-    /* meaning, then at least one example: a frame with nothing to show is dropped */
-    if (!today && !swaps.length) continue;
-    seen.add(es.toLowerCase());
-    out.push(Object.assign({
-      type: o.type === "link" ? "link" : "frame",
-      es: es, ko: ko, note: cleanStr(o.note),
-      literal: koLine(o.literal, null, LITERAL_CHARS),
-      why: firstSentences(koLine(o.why, null, IDIOM_WHY_CHARS), 1, IDIOM_WHY_CHARS),
-      today: today, swaps: swaps,
-      forms: o.type === "link" ? [] : cleanTable(o.forms, "who", WHO_MAP, WHO_ORDER)
-    }, cleanEn(o)));
-    if (out.length >= MAX_FRAMES) break;
-  }
-  return out;
 }
 
 /* ---- grammar words a beginner should never hear ----
@@ -467,77 +279,7 @@ function banScrub(s, state){
   return BAN_RE.test(open) ? "" : t;
 }
 
-/* A small table whose first column is a free short Korean label (나, 이미,
-   그것을 …), as the grammar part writes it. */
-function cleanLabelTable(list){
-  const out = [];
-  for (const c of (Array.isArray(list) ? list : [])){
-    const o = asObj(c), p = cleanPair(o);
-    const label = cleanStr(o && (o.label || o.who || o.when));
-    if (!p || !label || label.length > 12) continue;
-    out.push({ who: label, es: p.es, ko: p.ko });
-    if (out.length >= 6) break;
-  }
-  return out.length >= 2 ? out : [];
-}
-
-/* new_words: only the words the app asked for, in its order. A missing or
-   half-written one is simply not taught today — and so not counted as learned. */
-function cleanNewWords(list, want, ban){
-  const got = new Map();
-  for (const x of (Array.isArray(list) ? list : [])){
-    const o = asObj(x);
-    const es = cleanStr(o && o.es), ko = cleanStr(o && o.ko);
-    if (!es || !ko || got.has(foldEs(es))) continue;
-    got.set(foldEs(es), o);
-  }
-  const out = [];
-  for (const w of (Array.isArray(want) ? want : [])){
-    const o = got.get(foldEs(w));
-    if (!o) continue;
-    const ex = cleanPair(o.example);
-    out.push(Object.assign({
-      es: w, ko: cleanStr(o.ko), ex: ex,
-      times: cleanTable(o.times, "when", WHEN_MAP, WHEN_ORDER)
-    }, cleanEn(o)));
-  }
-  return out;
-}
-
-function cleanGrammar(raw, ban){
-  const o = asObj(raw);
-  if (!o) return null;
-  const explain = (Array.isArray(o.explain) ? o.explain : [o.explain])
-    .map((s) => banScrub(s, ban)).filter(Boolean).slice(0, 3);
-  const examples = cleanPairs(o.examples, 6);
-  const quiz = (Array.isArray(o.quiz) ? o.quiz : []).map(cleanPair).filter(Boolean).slice(0, 2);
-  const g = Object.assign({
-    explain: explain, rule: banScrub(o.rule, ban), examples: examples,
-    literal: koLine(o.literal, ban, ORDER_CHARS),
-    table: cleanLabelTable(o.table), quiz: quiz
-  }, cleanEn(o));
-  return g.explain.length || g.rule || g.examples.length || g.quiz.length ? g : null;
-}
-
-function cleanPronoun(raw, sources, ban){
-  const o = asObj(raw);
-  if (!o) return null;
-  const short = (v) => { const s = banScrub(v, ban); return s.length <= 14 ? s : ""; };
-  const points = (Array.isArray(o.points) ? o.points : []).map((x) => {
-    const p = cleanPair(x);
-    return p ? { es: p.es, ko: p.ko, who: short(x.who), what: short(x.what),
-                 today: !!sources && sources.length > 0 && isQuoted(p.es, sources) } : null;
-  }).filter(Boolean).slice(0, 3);
-  const quiz = (Array.isArray(o.quiz) ? o.quiz : []).map(cleanPair).filter(Boolean).slice(0, 3);
-  return points.length || quiz.length ? { points: points, quiz: quiz } : null;
-}
-
-/* 4교시, word by word. Each word must really be in its sentence (a word the
-   model made up is never explained as if it had been said), the same word is
-   kept once, and an explanation is cut to WHY_MAX sentences so one word never
-   turns into a lecture. A why or tip that uses a banned grammar word in the
-   open is dropped; the word itself stays with its meaning. */
-const SENT_WORDS_MAX = 16, WHY_MAX = 3, WHY_CHARS = 170, TIP_CHARS = 70, FUN_CHARS = 100;
+/* the first n sentences of s, within cap characters — or nothing */
 function firstSentences(s, n, cap){
   /* no look-behind here: an older iPhone Safari refuses the whole file over one */
   const parts = (cleanStr(s).match(/[^.!?]+[.!?]*/g) || []).map((p) => p.trim()).filter(Boolean);
@@ -548,35 +290,8 @@ function firstSentences(s, n, cap){
   }
   return out.length > cap ? "" : out;
 }
-function cleanSentWords(list, sentEs, ban){
-  const toks = esTokens([sentEs]);
-  const out = [], seen = new Set();
-  for (const x of (Array.isArray(list) ? list : [])){
-    const o = asObj(x);
-    const es = cleanStr(o && o.es).replace(/^[¿¡"«]+|[.,;:!?"»]+$/g, ""), ko = cleanStr(o && o.ko);
-    if (!es || !ko || /[가-힣]/.test(es) || ko.length > 40) continue;
-    const parts = foldEs(es).split(/[^a-z]+/).filter(Boolean);
-    if (!parts.length || !parts.every((t) => toks.has(t))) continue;
-    const k = parts.join(" ");
-    if (seen.has(k)) continue;
-    seen.add(k);
-    const tip = banScrub(o.tip, ban);
-    out.push({ es: es, ko: ko, why: firstSentences(banScrub(o.why, ban), WHY_MAX, WHY_CHARS),
-               tip: tip.length <= TIP_CHARS ? tip : "" });
-    if (out.length >= SENT_WORDS_MAX) break;
-  }
-  return out;
-}
-function cleanFun(v, ban){
-  const s = banScrub(v, ban);
-  return s && s.length <= FUN_CHARS && /[가-힣]/.test(s) ? s : "";
-}
-
-/* «why this shape» extras: the word order line, a literal reading, the
-   one-change swaps and an idiom's easy examples. Each is optional and each is
-   checked on its own, so a broken one is dropped and the rest stands. */
-const ORDER_CHARS = 160, LITERAL_CHARS = 60, WHAT_CHARS = 90, IDIOM_WHY_CHARS = 120;
-const SWAP_WORDS = 8, EXAMPLE_WORDS = 7, MAX_SWAPS = 3, MAX_EXAMPLES = 3;
+/* bounds for the short Korean lines and examples the AI writes */
+const LITERAL_CHARS = 60, IDIOM_WHY_CHARS = 120, EXAMPLE_WORDS = 7;
 /* a Korean line of bounded length, banned words scrubbed */
 function koLine(v, ban, cap){
   const s = banScrub(v, ban);
@@ -589,41 +304,10 @@ function noNewNumbers(es, src){
   const have = new Set(digitsOf(src));
   return digitsOf(es).every((d) => have.has(d));
 }
-function cleanSwaps(list, sentEs, ban){
-  const out = [], seen = new Set([foldEs(sentEs)]);
-  for (const x of (Array.isArray(list) ? list : [])){
-    const p = cleanPair(x);
-    if (!p || /[가-힣]/.test(p.es) || !/[가-힣]/.test(p.ko)) continue;
-    if (wordCount(p.es) > SWAP_WORDS || !noNewNumbers(p.es, sentEs)) continue;
-    const k = foldEs(p.es);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push({ es: p.es, ko: p.ko, what: koLine(x && x.what, ban, WHAT_CHARS) });
-    if (out.length >= MAX_SWAPS) break;
-  }
-  return out;
-}
-function cleanExamples(list, src){
-  const out = [], seen = new Set();
-  for (const x of (Array.isArray(list) ? list : [])){
-    const p = cleanPair(x);
-    if (!p || /[가-힣]/.test(p.es) || wordCount(p.es) > EXAMPLE_WORDS || !noNewNumbers(p.es, src)) continue;
-    const k = foldEs(p.es);
-    if (seen.has(k)) continue;
-    seen.add(k);
-    out.push(p);
-    if (out.length >= MAX_EXAMPLES) break;
-  }
-  return out;
-}
 /* spoken: arrows, quote marks and ~ are for the eye */
 function sayWhy(s){
   return String(s || "").replace(/\s*[→↔]\s*/g, ", ").replace(/[«»‘’“”]/g, "")
     .replace(/\s*~\s*/g, " ").replace(/\s+/g, " ").trim();
-}
-/* spoken: the «» and the dashes are for the eye */
-function sayOrder(s){
-  return sayWhy(String(s || "").replace(/[«»]/g, "").replace(/\s+-\s+/g, ", "));
 }
 
 /* The reply was cut off: keep everything up to the last value that closed,
@@ -654,82 +338,135 @@ function lessonSalvageJson(text){
 }
 
 /* Drop anything missing a side, so a half-written item can never become a
-   silent segment or a blank line later on. Every new part is optional: a
-   reply cut short loses that part, never the lesson.
-   `sourceEs`, when given, is the Spanish actually said today; it is what a
-   frame's "today" example is checked against. An EMPTY array means nothing
-   was said today: then nothing may claim to come from today's talk.
-   `cur`, when given, is the day's curriculum plan (curriculumPlan). */
+   silent segment or a blank line later on. Every part is optional except the
+   targets or the story: a reply cut short loses that part, never the lesson.
+   `sourceEs`, when given, is the Spanish actually said today; numbers in the
+   story and examples are checked against it. `cur`, when given, is the day's
+   curriculum plan (curriculumPlan): only its queued new words may be claimed
+   as used, and only when the story really says them. */
+const TARGETS_MAX = 5, STORY_MAX = 14, CHALLENGE_MAX = 12, FRAMES_STORY_MAX = 2, NEW_USED_MAX = 4;
+const TARGET_WORDS = 6, LINE_WORDS = 14, CHALLENGE_WORDS = 8;
+const hasKo = (s) => /[가-힣]/.test(String(s || ""));
+/* `es` said as whole words inside `line`, accents, case and punctuation aside */
+function phraseIn(es, line){
+  const k = reviewKey(es);
+  return k !== "" && (" " + reviewKey(line) + " ").indexOf(" " + k + " ") >= 0;
+}
+/* a Spanish line of at most `words` words, Korean meaning beside it, no made-up number */
+function cleanLine(x, words, src){
+  const p = cleanPair(x);
+  if (!p || hasKo(p.es) || !hasKo(p.ko) || wordCount(p.es) > words || !noNewNumbers(p.es, src)) return null;
+  return p;
+}
+function cleanLines(list, words, src, max){
+  const out = [], seen = new Set();
+  for (const x of (Array.isArray(list) ? list : [])){
+    const p = cleanLine(x, words, src);
+    if (!p || seen.has(foldEs(p.es))) continue;
+    seen.add(foldEs(p.es));
+    out.push(p);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
 function lessonNormalise(raw, sourceEs, cur){
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("대본 형식이 올바르지 않습니다.");
-  const sources = Array.isArray(sourceEs) ? sourceEs.map(quoteKey) : null;
-  const silent = Array.isArray(sourceEs) && sourceEs.length === 0;
   const srcAll = Array.isArray(sourceEs) ? sourceEs.join(" ") : "";
   const ban = { used: false };
-  const note = (v) => banScrub(v, ban);
+  const gest = (v) => koLine(v, ban, 60);
 
-  const words = (silent ? [] : Array.isArray(raw.words) ? raw.words : [])
-    .map((w) => Object.assign({ es: cleanStr(w && w.es), ko: cleanStr(w && w.ko), note: note(w && w.note) },
-                              cleanEn(w)))
-    .filter((w) => w.es && w.ko)
-    .slice(0, 14);
-
-  /* today's new words, minus any that turned up in today's own words */
-  const talked = new Set(words.map((w) => foldEs(w.es)));
-  const newWords = cleanNewWords(raw.new_words, cur && cur.newWords, ban)
-    .filter((w) => !talked.has(foldEs(w.es)));
-  const grammar = cur && cur.grammar ? cleanGrammar(raw.grammar, ban) : null;
-  if (!words.length && !newWords.length && !grammar) throw new Error("대본에 단어가 없습니다.");
-
-  const known = words.map((w) => w.es);
-  const idioms = (silent ? [] : Array.isArray(raw.idioms) ? raw.idioms : [])
-    .map((x) => Object.assign({
-      es: cleanStr(x && x.es), ko: cleanStr(x && x.ko),
-      from: cleanStr(x && x.from), note: note(x && x.note),
-      literal: koLine(x && x.literal, ban, LITERAL_CHARS),
-      why: firstSentences(koLine(x && x.why, ban, IDIOM_WHY_CHARS), 1, IDIOM_WHY_CHARS),
-      examples: cleanExamples(x && x.examples, srcAll)
-    }, cleanEn(x)))
-    .filter((x) => x.es && x.ko)
-    .slice(0, 5);
-  for (const x of idioms) if (known.indexOf(x.from) < 0) x.from = "";
-
-  let timesLeft = MAX_TIMES;
-  const sentences = (silent ? [] : Array.isArray(raw.sentences) ? raw.sentences : [])
-    .map((s) => ({
-      es: cleanStr(s && s.es), ko: cleanStr(s && s.ko),
-      order: koLine(s && s.order, ban, ORDER_CHARS),
-      words: cleanSentWords(s && s.words, cleanStr(s && s.es), ban),
-      fun: cleanFun(s && s.fun, ban),
-      swaps: cleanSwaps(s && s.swaps, cleanStr(s && s.es), ban),
-      chunks: (Array.isArray(s && s.chunks) ? s.chunks : [])
-        .map((c) => Object.assign({
-          es: cleanStr(c && c.es), ko: cleanStr(c && c.ko), note: note(c && c.note),
-          literal: koLine(c && c.literal, ban, LITERAL_CHARS),
-          times: cleanTable(c && c.times, "when", WHEN_MAP, WHEN_ORDER)
-        }, cleanEn(c)))
-        .filter((c) => c.es && c.ko)
-        .slice(0, 6)
-    }))
-    .filter((s) => s.es && s.ko)
-    .slice(0, 6);
-  /* a verb table is a treat, not every chunk: only the first few survive */
-  for (const s of sentences) for (const c of s.chunks){
-    if (c.times.length && timesLeft > 0) timesLeft--; else c.times = [];
+  const targets = [], tseen = new Set();
+  for (const x of (Array.isArray(raw.targets) ? raw.targets : [])){
+    const p = cleanLine(x, TARGET_WORDS, srcAll);
+    if (!p || tseen.has(foldEs(p.es))) continue;
+    tseen.add(foldEs(p.es));
+    const base = cleanStr(x.base);
+    targets.push({
+      es: p.es, ko: banScrub(p.ko, ban) || p.ko,
+      base: base && !hasKo(base) && wordCount(base) <= 3 ? base : "",
+      baseKo: koLine(x.base_ko, ban, 24),
+      how: koLine(x.how, ban, 100),
+      ex: cleanLine(x.example, EXAMPLE_WORDS, srcAll),
+      gesture: gest(x.gesture)
+    });
+    if (targets.length >= TARGETS_MAX) break;
   }
 
-  const frames = silent ? [] : cleanFrames(raw.frames, sources);
-  for (const f of frames) f.note = note(f.note);
+  const st = asObj(raw.story) || {};
+  const lines = [];
+  for (const x of (Array.isArray(st.lines) ? st.lines : [])){
+    const p = cleanLine(x, LINE_WORDS, srcAll);
+    const who = cleanStr(x && x.who);
+    if (!p || !who || who.length > 8 || !hasKo(who)) continue;
+    lines.push({ who: who, es: p.es, ko: p.ko, learner: x.learner === true, gesture: gest(x.gesture) });
+    if (lines.length >= STORY_MAX) break;
+  }
+  if (!targets.length && !lines.length) throw new Error("대본에 표현이 없습니다.");
+  const spoken = lines.map((l) => l.es).concat(targets.map((t) => t.es));
+
+  /* a frame is taught inside the story or not at all */
+  const frames = [], fseen = new Set();
+  for (const x of (Array.isArray(raw.frames) ? raw.frames : [])){
+    const o = asObj(x);
+    const es = cleanFrameEs(o && o.es), ko = cleanStr(o && o.ko);
+    if (!es || !hasKo(ko) || fseen.has(foldEs(es)) || !spoken.some((l) => phraseIn(es, l))) continue;
+    fseen.add(foldEs(es));
+    frames.push({ es: es, ko: ko, note: koLine(o.note, ban, 70) });
+    if (frames.length >= FRAMES_STORY_MAX) break;
+  }
+
+  const io = asObj(raw.idiom);
+  const idiom = io && cleanStr(io.es) && !hasKo(io.es) && hasKo(io.ko) ? {
+    es: cleanStr(io.es), ko: cleanStr(io.ko),
+    literal: koLine(io.literal, ban, LITERAL_CHARS),
+    why: firstSentences(koLine(io.why, ban, IDIOM_WHY_CHARS), 1, IDIOM_WHY_CHARS),
+    ex: cleanLine(io.example, EXAMPLE_WORDS, srcAll)
+  } : null;
+
+  /* claimed new words: only queued ones, only in the form the story really says */
+  const queued = new Map((cur && Array.isArray(cur.newWords) ? cur.newWords : []).map((w) => [foldEs(w), w]));
+  const newUsed = [], nseen = new Set();
+  for (const x of (Array.isArray(raw.new_words_used) ? raw.new_words_used : [])){
+    const o = asObj(x);
+    const w = queued.get(foldEs(o && o.es)), form = cleanStr(o && o.form).replace(/^[¡¿]+|[.,!?]+$/g, "");
+    const ko = koLine(o && o.ko, ban, 30);
+    if (!w || !form || !ko || nseen.has(w)) continue;
+    const at = lines.findIndex((l) => phraseIn(form, l.es));
+    const inTarget = targets.findIndex((t) => phraseIn(form, t.es));
+    if (at < 0 && inTarget < 0) continue;
+    nseen.add(w);
+    newUsed.push({ es: w, form: form, ko: ko, line: at, target: inTarget });
+    if (newUsed.length >= NEW_USED_MAX) break;
+  }
+
+  const ch = asObj(raw.cheat) || {};
+  const cheat = {
+    hook: koLine(ch.hook, ban, 70),
+    explain: (Array.isArray(ch.explain) ? ch.explain : [ch.explain])
+      .map((s) => koLine(s, ban, 130)).filter(Boolean).slice(0, 2),
+    examples: cleanLines(ch.examples, EXAMPLE_WORDS, srcAll, 2)
+  };
+
+  const pron = asObj(raw.pronoun);
+  const firstLearner = lines.find((l) => l.learner);
+  const take = cleanLine(raw.takeaway, 9, srcAll) || (firstLearner ? { es: firstLearner.es, ko: firstLearner.ko }
+    : targets[0] ? { es: targets[0].es, ko: targets[0].ko } : null);
 
   return {
-    newWords: newWords,
-    words: words,
-    idioms: idioms,
-    sentences: sentences,
-    grammar: grammar,
-    pronoun: cleanPronoun(raw.pronoun, sources, ban),
+    fmt: LESSON_FMT,
+    situation: koLine(asObj(raw.situation) && raw.situation.setup, ban, 170),
+    targets: targets,
+    cheat: cheat,
     frames: frames,
-    outro: banScrub(raw.outro, ban) || "오늘 수업 끝. 내일 한 번 꼭 써먹어 보세요."
+    story: { title: koLine(st.title, ban, 30), setup: koLine(st.setup, ban, 140), lines: lines },
+    idiom: idiom,
+    newUsed: newUsed,
+    challenge: cleanLines(raw.challenge, CHALLENGE_WORDS, srcAll, CHALLENGE_MAX),
+    pronoun: { points: [], quiz: pron ? cleanLines(pron.quiz, CHALLENGE_WORDS, srcAll, 3) : [] },
+    takeaway: take,
+    mission: koLine(raw.mission, ban, 90),
+    outro: koLine(raw.outro, ban, 80) || "오늘 수업 끝. 수고하셨어요!"
   };
 }
 
@@ -751,8 +488,8 @@ async function lessonWriteScript(rows, cur){
     pronoun_hits: cur ? cur.pronounHits : [],
     recent: cur && cur.recentList ? cur.recentList : undefined
   });
-  /* the reply is long now (ten new words, a grammar part, a drill on top of
-     the old parts): the cap is set well above it, so a cut-off reply means
+  /* the reply is a few thousand tokens (targets, a short role-play, the
+     challenge lines): the cap is set far above it, so a cut-off reply means
      something went wrong rather than that the lesson simply grew */
   const cfg = { temperature: 0.4, thinking_level: "medium", max_output_tokens: 32768 };
   /* with a Claude key the script is written by Claude first (same prompt, same
@@ -810,15 +547,6 @@ async function lessonWriteScript(rows, cur){
 
 /* ---------------- segments and display rows ---------------- */
 
-/* 와 or 과 after a Hangul word, by whether its last syllable ends in a
-   consonant; after anything else (English the Korean voice reads as is)
-   a spaced 하고, which never sounds wrong. */
-function withKo(word){
-  const s = String(word || "").replace(/[\s~.,'·-]+$/, "");
-  const c = s.charCodeAt(s.length - 1);
-  if (c >= 0xAC00 && c <= 0xD7A3) return (c - 0xAC00) % 28 ? "과" : "와";
-  return " 하고";
-}
 /* A frame's meaning is written with ~ where the swapped part goes. On screen
    that reads well; aloud a voice may say "물결" or nothing at all, so the
    spoken line says 뭐뭐 instead. */
@@ -860,7 +588,6 @@ const dayNum = (iso) => Math.round(Date.UTC(Number(iso.slice(0, 4)), Number(iso.
 function isoAddDays(iso, n){
   return new Date((dayNum(iso) + n) * 86400000).toISOString().slice(0, 10);
 }
-function isoLabel(iso){ return Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) + "일"; }
 
 function newWordsLearned(){
   const s = asObj(jget(NEW_WORDS_KEY, null));
@@ -1228,8 +955,6 @@ const PRON_BASE = [
   { es: "Les sirvo la sopa.", ko: "그분들께 수프를 드려요.", who: "그 사람들에게", what: "수프를" }
 ];
 const PRON_POINTS = 2, PRON_QUIZ = 3;
-const PRON_LEAD = "lo·le·se 연습이에요. 문장마다 ‘누구에게?’ 와 ‘무엇을?’ 만 짚어 볼게요.";
-const PRON_QUIZ_LEAD = "퀴즈 세 개예요. 한국어를 듣고, 3초 안에 스페인어로 말해 보세요.";
 
 /* What the drill teaches today: Gemini's points and quiz where it wrote
    them, the base set filling whatever is missing. Never empty. */
@@ -1305,7 +1030,7 @@ function curriculumCommit(lesson){
    frames are. What the user asked about yesterday comes first. */
 const YDAY_SENTS = 2, YDAY_EXPR_MIN = 3, YDAY_EXPR_MAX = 6;
 const YDAY_MAX_MS = 270000;         // about four and a half minutes, everything in
-const YDAY_PRI = { frame: 1, idiom: 2, sent: 3 };
+const YDAY_PRI = { expr: 1, frame: 1, idiom: 2, sent: 3 };
 
 /* lower case, Spanish accents and punctuation gone; Hangul is put back together */
 function reviewKey(s){
@@ -1330,6 +1055,11 @@ function reviewItemsFrom(rec){
     if (!r) continue;
     const es = cleanStr(r.es), ko = cleanStr(r.ko);
     if (!es || !ko) continue;
+    /* a story20 lesson marks the head row of each item it taught */
+    if (r.rv){
+      if (YDAY_PRI[r.rv]) add({ type: r.rv, es: es.replace(/\s*…$/, ""), show: es, ko: ko, ex: null });
+      continue;
+    }
     if (isFrameHead(r)){
       /* one example to go with it: a swapped one first, else the real one */
       let swap = null, real = null;
@@ -1435,631 +1165,544 @@ function reviewPlan(prev, iso){
            items: take, estMs: ms };
 }
 
-/* ---- so the same words are not said the same way every day ----
-   A short turn into each part, and a few ways of saying «next», picked by the
-   day and the place: the same lesson always comes out the same, two days do
-   not. The first item of a part keeps its plain «첫 번째». */
-const TURN = {
-  words: ["이제 오늘 대화에서 나온 단어예요.", "자, 오늘 주방에서 들린 단어들이에요.",
-          "오늘 대화 속 단어로 넘어갈게요.", "귀를 열고, 오늘 대화 단어 갑니다."],
-  sents: ["이제 문장을 낱말 하나하나 뜯어볼 시간이에요. 왜 이런 모양인지 같이 볼게요.",
-          "문장 해부 시간이에요. 낱말마다 다 사연이 있어요.",
-          "오늘 문장을 돋보기로 들여다볼게요. 낱말 하나씩이에요.",
-          "이번엔 문장 속 낱말이 왜 그 모양인지 하나씩 풀어 볼게요."],
-  frames: ["말의 뼈대예요. 이것만 잡으면 문장이 술술 나와요.", "이제 말의 뼈대예요. 틀은 두고 안만 바꿔 끼우면 돼요.",
-           "뼈대 시간이에요. 문장을 잇는 접착제 같은 말들이에요."],
-  review: ["마무리로 오늘 새로 배운 것만 빠르게 한 번씩 훑을게요.", "끝으로 오늘 것만 한 번씩 빠르게 들을게요.",
-           "마지막 한 바퀴, 오늘 새로 배운 것만이에요."]
+/* ---------------- the 20-minute lesson: five parts, built in code ----------------
+
+   The AI writes the material (lessonNormalise); everything about time is
+   decided here: what is said in which part, how often, and the silences the
+   learner answers in. Each part is built at a few levels of fullness and the
+   combination whose estimated length lands nearest 20:00 (and nearest each
+   part's own slot) is kept. A lesson made this way carries fmt LESSON_FMT;
+   lessonTimeline then writes the real start and end of each part into its
+   title. Old saved lessons have no fmt and are left exactly as they were. */
+
+const LESSON_FMT = "story20";
+const LESSON_TARGET_MS = 20 * 60000;
+const PARTS = {
+  warm:      { id: "warm",      title: "① 도입 · 워밍업",            slot: 180000 },
+  cheat:     { id: "cheat",     title: "② 치트키 1",                 slot: 300000 },
+  story:     { id: "story",     title: "③ 치트키 2 · 위기 탈출 상황극", slot: 360000 },
+  challenge: { id: "challenge", title: "④ 1초 반응 챌린지",            slot: 240000 },
+  cool:      { id: "cool",      title: "⑤ 쿨다운 · 오늘의 미션",        slot: 120000 }
 };
-const NEXT_SAY = ["다음, ", "이번엔 ", "그다음은 ", ""];
-const SENT_SAY = ["다음 문장이에요.", "자, 이번 문장이에요.", "또 하나 갈게요.", "이어서 이 문장이에요."];
-const GUESS_SAY = ["맞혀 보세요. 이 말은 무슨 뜻일까요?", "퀴즈 하나. 이건 무슨 뜻일까요?", "잠깐, 이 말 뜻을 먼저 떠올려 보세요."];
-const ANSWER_SAY = ["정답은, ", "답은, ", "맞혀 보셨나요? "];
-const FUN_SAY = ["멕시코 이야기 하나. ", "현지 꿀팁 하나. ", "알아 두면 재미있는 것. "];
-const TIP_SAY = ["기억 요령. ", "외우는 방법. ", "이렇게 외워요. "];
-const KNOWN_SAY = {
-  words: ["최근에 배운 단어는 한 번씩만 들을게요.", "이건 요 며칠 배운 단어예요. 한 번씩만 갈게요."],
-  idioms: ["이건 최근에 배운 숙어예요. 한 번만 들을게요.", "요 며칠 배운 숙어, 한 번씩만요."]
+
+/* Pauses, in seconds. The answer gaps are the point of the lesson: the
+   learner speaks into them. */
+const Q = {
+  lead: 0.8, say: 0.6, role: 0.25, line: 0.8, lineKo: 1.0,
+  think3: 3.0,                 // the warm-up speed quiz: three seconds to answer
+  think2: 2.0,                 // «거꾸로»: the meaning, then a beat longer than the challenge
+  think1: 1.0,                 // the one-second challenge
+  afterAns: 1.6,               // after an answer, time to say it once more
+  repMin: 2.4, repMax: 3.0, repPad: 1.0,   // repeat-after-me: the line's length plus a breath
+  chain: 2.0,                  // the rhythm chain, a steady beat between targets
+  section: 1.2                 // added on top, between parts
 };
+/* the gap after a model line the learner repeats: as long as the line, plus a breath, 2-3 s */
+function repGap(es){
+  const sec = estimateMs({ speaker: "es", text: String(es || ""), rate: 1 }) / 1000 + Q.repPad;
+  return Math.round(Math.min(Q.repMax, Math.max(Q.repMin, sec)) * 10) / 10;
+}
+
+/* Generated sound cues, written into the mp3 in front of a segment: a chime
+   where a part starts, a tick right before a quiz answer. Length is the whole
+   slot, tone plus the short silence after it. Device voice plays none. */
+const CUE_MS = { chime: 650, tick: 200 };
+const CUE_TONES = { chime: [{ f: 880, ms: 170, decay: 9 }, { f: 1318.5, ms: 260, decay: 9 }],
+                    tick: [{ f: 1760, ms: 55, decay: 60 }] };
+const CUE_GAIN = 7000;
+function cuePcm(kind, sr){
+  const notes = CUE_TONES[kind];
+  const out = new Int16Array(notes ? Math.round(sr * CUE_MS[kind] / 1000) : 0);
+  let at = 0;
+  for (const n of (notes || [])){
+    const len = Math.round(sr * n.ms / 1000);
+    for (let k = 0; k < len && at + k < out.length; k++){
+      const t = k / sr;
+      const env = Math.min(1, k / (sr * 0.005)) * Math.exp(-t * n.decay);
+      out[at + k] = Math.round(CUE_GAIN * env * Math.sin(2 * Math.PI * n.f * t));
+    }
+    at += len;
+  }
+  return out;
+}
+
+const CR_REPEAT = "🗣 따라 하세요", CR_SAY = "🗣 말해 보세요", CR_FAST = "🗣 1초 안에 말해 보세요";
 const pickSay = (pool, n) => pool[((n % pool.length) + pool.length) % pool.length];
-const LESSON_MAX_MS = 25 * 60000;   // over this, the repeats are cut back (lessonBuild)
+const plainKo = (s) => String(s || "").replace(/\s*~\s*/g, " ").replace(/\s+/g, " ").trim();
 
-/* The content becomes a flat segment list (what gets spoken) plus display rows
-   (what gets shown). A three-times repeat is several segments inside one row.
-   `prev`, when given, is the saved lesson before this one: 0교시 reviews it.
-   `cur`, when given, is the day's course plan (curriculumPlan): the new words
-   to review in 0교시, and the grammar step 5교시 teaches. */
-function lessonBuild(content, when, prev, cur, trim){
-  trim = trim || 0;
-  const segs = [], rows = [];
-  let sid = 0, gid = 0;
+/* One part: its own rows and segments with local ids, joined at the end. */
+function lessonPart(part){
+  const rows = [], segs = [];
+  let g = 0;
+  return {
+    part: part, rows: rows, segs: segs, taught: [], newUsed: [], learnedKo: {},
+    row(kind, fields){ g++; rows.push(Object.assign({ gid: g, kind: kind }, fields)); return g; },
+    seg(gid, speaker, text, pause, extra){
+      text = cleanStr(text);
+      if (!text) return;
+      segs.push(Object.assign({ speaker: speaker, text: text, rate: 1, pauseAfter: pause, gid: gid }, extra || {}));
+    },
+    ms(){ return segs.reduce((n, s) => n + estimateMs(s) + (CUE_MS[s.cue] || 0) + s.pauseAfter * 1000, 0); },
+    teach(t, es){ if (cleanStr(es)) this.taught.push({ t: t, es: cleanStr(es).replace(/\s*…$/, "") }); }
+  };
+}
+/* a narrated line, shown and said */
+function pSay(p, ko, pause, extra, shown){
+  const g = p.row("say", { ko: shown || ko });
+  p.seg(g, "ko", ko, pause == null ? Q.lead : pause, extra);
+  return g;
+}
+/* repeat after me, `n` times at a steady pace, then the meaning */
+function pRepeat(p, x, n, fields, cue){
+  const g = p.row("pair", Object.assign({ es: x.es, ko: x.ko, cr: CR_REPEAT }, fields || {}));
+  const gap = repGap(x.es);
+  if (cue) p.seg(g, "ko", cue, Q.say);
+  for (let k = 0; k < n; k++) p.seg(g, "es", x.es, gap);
+  p.seg(g, "ko", plainKo(x.ko), Q.lead);
+  return g;
+}
+/* a quiz line: the Korean, a gap to answer in, a tick, the Spanish, a gap to say it again.
+   On screen the Spanish stays covered until it plays (see lessonTimeline). */
+function pQuiz(p, x, think, fields){
+  const g = p.row("pair", Object.assign({ es: x.es, ko: x.ko, quiz: true }, fields || {}));
+  p.seg(g, "ko", plainKo(x.ko), think);
+  p.seg(g, "es", x.es, Q.afterAns, { cue: "tick" });
+  return g;
+}
 
-  function row(sec, kind, fields){
-    gid++;
-    rows.push(Object.assign({ gid: "g" + gid, sectionId: sec.id, sectionTitle: sec.title, kind: kind }, fields));
-    return "g" + gid;
-  }
-  function seg(sec, g, speaker, text, pause, rate){
-    text = cleanStr(text);
-    if (!text) return;
-    sid++;
-    segs.push({
-      id: "s" + sid, speaker: speaker, text: text, rate: rate || 1,
-      pauseAfter: pause, sectionId: sec.id, sectionTitle: sec.title, gid: g
-    });
-  }
+/* ① intro, the speed quiz on the last lesson, today's situation */
+function buildWarm(ctx, level){
+  const p = lessonPart(PARTS.warm), c = ctx.content;
+  const nT = c.targets.length;
+  const intro = ctx.dateLabel + " 스페인어 수업입니다. 오늘은 20분 동안 듣기만 하지 말고, 입으로 직접 말하는 수업이에요. " +
+    "조용해지는 틈이 나오면, 그 틈에 꼭 소리 내어 말해 보세요.";
+  pSay(p, intro, Q.lead, { cue: "chime" });
 
-  /* the English comparison: a badge on screen, one short Korean line aloud.
-     The ~ comes out of the spoken text only — the Korean voice reads it aloud
-     as «물결». The badge on screen is built from item.en and keeps it. */
-  function enLine(sec, item){
-    if (!item.en) return;
-    const say = (item.enSay || item.en).replace(/\s*~\s*/g, " ").replace(/\s+/g, " ").trim();
-    const gg = row(sec, "en", { en: item.en });
-    seg(sec, gg, "ko", "영어로는 " + say + withKo(say) + " 비슷해요.", P.en);
-  }
-  /* «why this shape»: what the words say one by one, then why it means what it
-     means — each line only when the model wrote one */
-  function whyBlock(sec, literal, why){
-    if (literal){
-      const gg = row(sec, "note", { ko: "글자 그대로: " + literal });
-      seg(sec, gg, "ko", "글자 그대로는 " + sayWhy(literal).replace(/[.。]\s*$/, "") + ".", P.note);
+  /* the tail is measured first, so the quiz gets whatever is left of the slot */
+  const tail = lessonPart(PARTS.warm);
+  const setup = c.situation || "오늘 여러분은 멕시코 식당 주방의 신입 요리사입니다! 오늘 하루를 말로 버텨 볼게요.";
+  pSay(tail, setup, Q.lead);
+  if (nT){
+    pSay(tail, "오늘 손에 쥘 무기는 딱 " + nT + "개예요. 먼저 소리만 들어 보세요.", Q.say);
+    for (const t of c.targets){
+      const g = tail.row("pair", { es: t.es, ko: t.ko, badge: "오늘의 무기" });
+      tail.seg(g, "es", t.es, Q.say);
+      tail.seg(g, "ko", plainKo(t.ko), Q.line);
     }
-    if (why){
-      const gg = row(sec, "note", { ko: why });
-      seg(sec, gg, "ko", sayWhy(why), P.note);
+  }
+  ctx.reviewN = 0;
+  if (!ctx.quiz.length) return [p, tail];
+  const q = lessonPart(PARTS.warm);
+  const who = ctx.plan ? (ctx.plan.yesterday ? "어제 배운 표현이에요." : "지난 " + ctx.plan.label + " 수업 표현이에요.")
+                       : "지난번에 배운 단어예요.";
+  pSay(q, "몸풀기로 3초 스피드 퀴즈! " + who + " 한국어를 들으면 3초 안에 스페인어로 말하세요. 그다음에 정답이 나와요.", Q.lead);
+  const room = PARTS.warm.slot - p.ms() - tail.ms() - 4000;
+  const took = [];
+  for (const it of ctx.quiz){
+    const trial = lessonPart(PARTS.warm);
+    pQuiz(trial, it, Q.think3, {});
+    if (took.length >= 2 && q.ms() + trial.ms() > room) break;
+    pQuiz(q, it, Q.think3, { badge: it.badge, cr: CR_SAY });
+    took.push(it);
+  }
+  /* level 1: the same ones again, faster — the ping-pong */
+  if (level >= 1 && took.length >= 3){
+    pSay(q, "한 번 더, 이번엔 2초!", Q.say);
+    for (const it of took.slice().reverse().slice(0, 6)) pQuiz(q, it, Q.think2, { badge: "2초", cr: CR_SAY });
+  }
+  pSay(q, pickSay(["좋아요, 입이 좀 풀렸죠?", "좋아요, 몸 풀렸죠?", "잘하셨어요. 이제 오늘 이야기로 갑니다."], ctx.dn), Q.say);
+  ctx.reviewN = took.length;
+  return [p, q, tail];
+}
+
+/* ② today's grammar step as one cheat code, then the targets in rhythm: a
+   slow model, three at a steady beat, an example; the little words lo·le·se;
+   then, by level, the targets backwards (meaning first) and in a chain */
+function buildCheat(ctx, level){
+  const c = ctx.content, step = ctx.step;
+  const title = PARTS.cheat.title + (step ? " · " + step.title.split(" — ")[0] : "");
+  const p = lessonPart(Object.assign({}, PARTS.cheat, { title: title }));
+  const hook = c.cheat.hook || (step ? step.rule : "오늘의 표현을 입에 붙여 볼게요.");
+  pSay(p, "치트키 1! " + plainKo(hook), Q.lead, { cue: "chime" }, "🔑 치트키: " + hook);
+  for (const line of c.cheat.explain) pSay(p, plainKo(line), Q.say);
+
+  c.targets.forEach((t, i) => {
+    const known = ctx.knownT("v", t.es);
+    const head = ordKo(i + 1) + "." + (t.base && t.baseKo ? "" : " " + plainKo(t.ko));
+    const g = p.row("lead", { ko: ordKo(i + 1) + (t.base ? " · " + t.base + (t.baseKo ? " (" + t.baseKo + ")" : "") : " · " + t.ko) });
+    p.seg(g, "ko", head, Q.say);
+    if (t.base && t.baseKo){
+      p.seg(g, "es", t.base, Q.say);
+      p.seg(g, "ko", plainKo(t.baseKo) + ".", Q.say);
     }
+    if (t.how && !known){
+      const gh = p.row("note", { ko: t.how });
+      p.seg(gh, "ko", sayWhy(t.how), Q.say);
+    }
+    if (level >= 1 && !known){
+      const gs = p.row("slow", { es: t.es, badge: "천천히" });
+      p.seg(gs, "ko", "천천히 한 번.", Q.role);
+      p.seg(gs, "es", t.es, repGap(t.es), { rate: SLOW_RATE });
+    }
+    pRepeat(p, t, known ? 1 : 3, { badge: known ? "최근 배운 것" : "×3 리듬", gesture: t.gesture || undefined, rv: "expr" },
+            i === 0 ? "세 번, 같은 박자로 따라 하세요." : "따라 하세요.");
+    if (!known) p.teach("v", t.es);
+    /* a queued new word that only a target uses (not the story) is taught here */
+    for (const w of c.newUsed){
+      if (w.line >= 0 || w.target !== i) continue;
+      const gw = p.row("pair", { es: w.es, ko: w.ko, badge: "🆕 새 단어", cr: CR_REPEAT });
+      p.seg(gw, "ko", "새 단어예요. " + plainKo(w.ko) + ".", Q.say);
+      p.seg(gw, "es", w.es, repGap(w.es));
+      p.newUsed.push(w);
+    }
+    if (level >= 1 && t.ex) pRepeat(p, t.ex, 1, { badge: "예문" }, "");
+  });
+
+  /* the grammar step's own examples: the AI's, else the course's */
+  const exs = c.cheat.examples.length ? c.cheat.examples : (step ? step.ex.slice(0, 1) : []);
+  if (exs.length){
+    pSay(p, "치트키가 들어간 문장 하나 더 들어 볼게요.", Q.say);
+    for (const x of exs) pRepeat(p, x, 1, { badge: "예문" }, "");
   }
-  /* a few very easy examples: Spanish, then Korean */
-  function exampleRows(sec, list, max, lead){
-    const xs = (Array.isArray(list) ? list : []).slice(0, Math.max(0, max));
-    xs.forEach((x, k) => {
-      const gg = row(sec, "pair", { es: x.es, ko: x.ko, badge: "예문" });
-      if (k === 0 && lead) seg(sec, gg, "ko", lead, P.lead);
-      seg(sec, gg, "es", x.es, P.frameEs);
-      seg(sec, gg, "ko", x.ko, P.frameKo);
-    });
-  }
-  /* 4교시 ⑤: one thing changed at a time, and what that change did */
-  function swapRows(sec, list, max){
-    const xs = (Array.isArray(list) ? list : []).slice(0, Math.max(0, max));
-    xs.forEach((x, k) => {
-      const gg = row(sec, "pair", { es: x.es, ko: x.ko, badge: "바꿔 끼우기" });
-      if (k === 0) seg(sec, gg, "ko", "한 군데만 바꿔 볼게요. 뜻이 어떻게 달라지는지 들어 보세요.", P.lead);
-      seg(sec, gg, "es", x.es, P.frameEs);
-      seg(sec, gg, "ko", x.ko, P.frameKo);
-      if (x.what){
-        const gw = row(sec, "note", { ko: "↔ " + x.what });
-        seg(sec, gw, "ko", sayWhy(x.what), P.note);
+
+  /* lo·le·se, two lines: who gets it, what is given */
+  if (ctx.pronPts.length){
+    pSay(p, "작은 말 lo, le, se 도 두 개만 볼게요. 누구에게, 무엇을, 만 들어 보세요.", Q.say);
+    for (const x of ctx.pronPts){
+      pRepeat(p, x, 1, { badge: "lo·le·se" }, "");
+      const ask = [x.who ? "누구에게? " + x.who : "", x.what ? "무엇을? " + x.what : ""].filter(Boolean);
+      if (ask.length){
+        const gn = p.row("note", { ko: ask.join(" · ") });
+        p.seg(gn, "ko", ask.join(". ") + ".", Q.say);
       }
-    });
+      p.teach("p", x.es);
+    }
   }
-  /* a small table on screen; aloud, every line Spanish then Korean */
-  function tableRow(sec, cap, capSay, table){
-    const gg = row(sec, "table", { ko: cap, table: table });
-    seg(sec, gg, "ko", capSay, P.tableLead);
-    table.forEach((c, k) => {
-      seg(sec, gg, "es", c.es, P.frameEs);
-      seg(sec, gg, "ko", sayKo(c.ko), k === table.length - 1 ? P.wordKoLast : P.frameKo);
-    });
+  if (level >= 2 && c.targets.length){
+    pSay(p, "이번엔 거꾸로! 한국어를 들으면 먼저 스페인어로 말해 보세요.", Q.lead);
+    for (const t of c.targets) pQuiz(p, t, Q.think2, { badge: "거꾸로", cr: CR_SAY });
+  }
+  /* level 4: each target's example, meaning first — the target inside a sentence */
+  if (level >= 4 && c.targets.some((t) => t.ex)){
+    pSay(p, "이번엔 문장으로! 한국어를 들으면 오늘 무기를 넣어서 말해 보세요.", Q.lead);
+    for (const t of c.targets) if (t.ex) pQuiz(p, t.ex, Q.think3, { badge: "문장으로", cr: CR_SAY });
+  }
+  if (level >= 3 && c.targets.length > 1){
+    pSay(p, "마지막으로 연달아, 리듬 타면서 두 번!", Q.say);
+    for (let round = 0; round < 2; round++){
+      const g = p.row("pair", { es: c.targets.map((t) => t.es).join(" · "), ko: "연달아 " + (round + 1) + "번째", cr: CR_REPEAT });
+      for (const t of c.targets) p.seg(g, "es", t.es, Q.chain);
+    }
+  }
+  return [p];
+}
+
+/* ③ the role-play: the frames first, then the scene with the learner's lines
+   repeated; by level, the scene once more in Spanish only, then with the
+   learner speaking first on their own lines, then on every line */
+function buildStory(ctx, level){
+  const c = ctx.content, lines = c.story.lines;
+  const p = lessonPart(PARTS.story);
+  const setup = c.story.setup || (c.story.title ? c.story.title + "." : "");
+  pSay(p, "치트키 2, 위기 탈출 상황극! " + setup, Q.lead, { cue: "chime" },
+       "🎬 " + (c.story.title ? c.story.title + " — " : "") + (c.story.setup || "위기 탈출 상황극"));
+
+  c.frames.forEach((f) => {
+    const known = ctx.knownT("f", f.es);
+    const lead = "오늘의 뼈대, " + plainKo(f.ko) + "." + (f.note ? " " + f.note : "");
+    const g = p.row("pair", { es: f.es + " …", ko: f.ko, badge: known ? "아는 뼈대" : "뼈대", cr: CR_REPEAT, rv: "frame" });
+    p.seg(g, "ko", sayKo(lead), Q.say);
+    const gap = repGap(f.es);
+    p.seg(g, "es", f.es, gap);
+    if (!known){ p.seg(g, "es", f.es, gap); p.teach("f", f.es); }
+  });
+
+  const learnerRole = (lines.find((l) => l.learner) || {}).who || "";
+  if (lines.length){
+    pSay(p, learnerRole ? "자, 상황 시작! 여러분은 " + learnerRole + "예요. " + learnerRole + " 대사는 따라 하세요."
+                        : "자, 상황 시작!", Q.lead);
+  }
+  const spot = new Map();
+  for (const w of c.newUsed) if (w.line >= 0 && !spot.has(w.line)) spot.set(w.line, w);
+  let who = "";
+  lines.forEach((l, i) => {
+    const g = p.row("pair", { es: l.es, ko: l.ko, role: l.who, cr: l.learner ? CR_REPEAT : undefined,
+                              gesture: l.gesture || undefined });
+    if (l.who !== who){ p.seg(g, "ko", l.who + ".", Q.role); who = l.who; }
+    if (l.learner){
+      p.seg(g, "es", l.es, repGap(l.es));
+      p.seg(g, "ko", l.ko, Q.lineKo);
+    } else {
+      p.seg(g, "es", l.es, Q.line);
+      p.seg(g, "ko", l.ko, Q.lineKo);
+    }
+    /* a queued new word the line used: the word itself, then the shape it had in the line */
+    const w = spot.get(i);
+    if (w){
+      const other = foldEs(w.form) !== foldEs(w.es);
+      const gw = p.row("pair", { es: w.es, ko: w.ko + (other ? " · 대사 속: " + w.form : ""), badge: "🆕 새 단어", cr: CR_REPEAT });
+      p.seg(gw, "ko", "새 단어예요. " + plainKo(w.ko) + ".", Q.say);
+      p.seg(gw, "es", w.es, repGap(w.es));
+      if (other){
+        p.seg(gw, "ko", "방금 대사에서는 이렇게 나왔어요.", Q.role);
+        p.seg(gw, "es", w.form, repGap(w.form));
+      }
+      p.newUsed.push(w);
+    }
+  });
+
+  const x = c.idiom;
+  if (x && !ctx.knownT("i", x.es)){
+    const g = p.row("pair", { es: x.es, ko: x.ko, badge: "보너스 숙어", cr: CR_REPEAT, rv: "idiom" });
+    p.seg(g, "ko", "보너스 숙어! " + plainKo(x.ko) + ".", Q.say);
+    const gap = repGap(x.es);
+    p.seg(g, "es", x.es, gap);
+    p.seg(g, "es", x.es, gap);
+    if (x.literal){
+      const gl = p.row("note", { ko: "글자 그대로: " + x.literal });
+      p.seg(gl, "ko", "글자 그대로는 " + sayWhy(x.literal).replace(/[.。]\s*$/, "") + ".", Q.say);
+    }
+    if (x.why){
+      const gw = p.row("note", { ko: x.why });
+      p.seg(gw, "ko", sayWhy(x.why), Q.say);
+    }
+    if (x.ex) pRepeat(p, x.ex, 1, { badge: "예문" }, "");
+    p.teach("i", x.es);
   }
 
-  /* a quiz line: the Korean, a gap to answer in, the Spanish, a gap to repeat.
-     On screen the Spanish stays covered until it plays (see lessonTimeline). */
-  /* a meaning may be written "~ 뒤에": the ~ is for the eye, not the ear */
-  const plain = (s) => String(s || "").replace(/\s*~\s*/g, " ").replace(/\s+/g, " ").trim();
-  function quizRow(sec, item, badge){
-    const gg = row(sec, "pair", { es: item.es, ko: item.ko, badge: badge, quiz: true });
-    seg(sec, gg, "ko", plain(item.ko), P.quizThink);
-    seg(sec, gg, "es", item.es, P.quizFollow);
+  if (level >= 1 && lines.length){
+    pSay(p, "이제 처음부터 끝까지, 스페인어로만 쭉 들어 볼게요.", Q.lead);
+    for (const l of lines){
+      const g = p.row("pair", { es: l.es, ko: l.ko, role: l.who, badge: "다시 듣기" });
+      p.seg(g, "es", l.es, Q.line);
+    }
   }
+  if (level >= 2 && learnerRole){
+    pSay(p, "이번엔 진짜 실전! " + learnerRole + " 차례에는 한국어 뜻만 나와요. 정답이 나오기 전에 먼저 말해 보세요.", Q.lead);
+    for (const l of lines){
+      if (l.learner) pQuiz(p, l, Q.think3, { role: l.who, badge: "실전", cr: CR_SAY });
+      else {
+        const g = p.row("pair", { es: l.es, ko: l.ko, role: l.who });
+        p.seg(g, "es", l.es, Q.line);
+      }
+    }
+  }
+  if (level >= 3 && lines.length){
+    pSay(p, "마지막 도전! 이번엔 모든 대사를 여러분이 먼저 말해요.", Q.lead);
+    for (const l of lines) pQuiz(p, l, Q.think3, { role: l.who, badge: "전부 내가", cr: CR_SAY });
+  }
+  /* level 4: the learner's own lines once more, now with one second */
+  if (level >= 4 && learnerRole){
+    pSay(p, "끝으로 " + learnerRole + " 대사만, 이번엔 1초 안에!", Q.say);
+    for (const l of lines) if (l.learner) pQuiz(p, l, Q.think1, { role: l.who, badge: "1초", cr: CR_FAST });
+  }
+  return [p];
+}
 
-  const frames = Array.isArray(content.frames) ? content.frames : [];
-  const newWords = Array.isArray(content.newWords) ? content.newWords : [];
-  const W = content.words.length, I = content.idioms.length, S = content.sentences.length;
-  const F = frames.length, NW = newWords.length;
-  /* the study day (03:00 local boundary, see studyDate in app.js), so the
-     stored key, the spoken date and the label on screen are all the one day —
-     a lesson made at half past midnight is still yesterday's lesson */
+/* ④ Korean in, Spanish out, within a second. Rounds go round the same items
+   in a different order. lo·le·se has its place here. */
+const ROUND_SAY = ["", "한 번 더! 이번엔 순서를 섞어서 갑니다.", "또 한 바퀴, 더 빠르게!", "한 바퀴 더, 순서가 또 바뀌어요!",
+                   "진짜 마지막 바퀴, 최고 속도로!"];
+function buildChallenge(ctx, rounds){
+  const c = ctx.content;
+  const p = lessonPart(PARTS.challenge);
+  const items = c.challenge.map((x) => ({ es: x.es, ko: x.ko, badge: "챌린지" }))
+    .concat(ctx.pron.map((x) => ({ es: x.es, ko: x.ko, badge: "lo·le·se" })));
+  if (!items.length) return [p];
+  pSay(p, "1초 반응 챌린지! 한국어 상황을 들으면, 1초 안에 스페인어로 말하세요. 그다음에 정답이 나와요.",
+       Q.lead, { cue: "chime" });
+  const half = Math.ceil(items.length / 2);
+  for (let r = 0; r < rounds; r++){
+    if (r) pSay(p, r === rounds - 1 && r > 1 ? ROUND_SAY[ROUND_SAY.length - 1] : ROUND_SAY[Math.min(r, ROUND_SAY.length - 2)], Q.say);
+    const order = r % 4 === 0 ? items : r % 4 === 1 ? items.slice().reverse()
+      : r % 4 === 2 ? items.filter((_, k) => k % 2 === 0).concat(items.filter((_, k) => k % 2 === 1))
+      : items.slice(half).concat(items.slice(0, half));
+    for (const x of order) pQuiz(p, x, Q.think1, { badge: x.badge, cr: CR_FAST });
+  }
+  for (const x of ctx.pron) p.teach("p", x.es);
+  return [p];
+}
+
+/* the take-away sentence built up from its end: «uno nuevo», «cambiarlo por
+   uno nuevo», then all of it — each piece repeated. Short ones are not cut. */
+function backChain(es){
+  const words = String(es || "").replace(/[¡!¿?.,;:]/g, "").split(/\s+/).filter(Boolean);
+  const out = [];
+  for (let k = 2; k < words.length - 1; k += 2) out.push(words.slice(words.length - k).join(" "));
+  return out;
+}
+
+/* ⑤ the one sentence to take home, the targets once more as a last check, at
+   level 1 the learner's own story lines once more, the mission */
+function buildCool(ctx, level){
+  const c = ctx.content;
+  const p = lessonPart(PARTS.cool);
+  const t = c.takeaway;
+  if (t){
+    pSay(p, "쿨다운. 오늘 건져 갈 한 문장이에요.", Q.lead, { cue: "chime" });
+    const gs = p.row("slow", { es: t.es, badge: "느리게" });
+    p.seg(gs, "es", t.es, Q.line, { rate: SLOW_RATE });
+    const gm = p.row("say", { ko: t.ko });
+    p.seg(gm, "ko", t.ko, Q.say);
+    const parts = backChain(t.es);
+    if (parts.length){
+      pSay(p, "뒤에서부터 조금씩 붙여 볼게요.", Q.say);
+      for (const piece of parts){
+        const g = p.row("pair", { es: piece, ko: "", badge: "뒤에서부터", cr: CR_REPEAT });
+        p.seg(g, "es", piece, repGap(piece));
+      }
+    }
+    pRepeat(p, t, 3, { badge: "×3", rv: "sent" }, "이제 통째로, 세 번 따라 하세요.");
+    p.teach("s", t.es);
+  } else pSay(p, "쿨다운.", Q.lead, { cue: "chime" });
+  if (c.targets.length){
+    pSay(p, "오늘의 무기, 마지막 점검! 한국어를 들으면 말해 보세요.", Q.say);
+    for (const x of c.targets) pQuiz(p, x, Q.think2, { badge: "마지막 점검", cr: CR_SAY });
+  }
+  const mine = c.story.lines.filter((l) => l.learner);
+  if (level >= 1 && mine.length){
+    pSay(p, "오늘 상황극에서 여러분이 한 말, 마지막으로 한 번씩 따라 하세요.", Q.say);
+    for (const l of mine) pRepeat(p, l, 1, { role: l.who, badge: "내 대사" }, "");
+  }
+  const mission = c.mission || (t ? "오늘 하루, 기회가 오면 속으로라도 ‘" + t.es + "’ 한 번 말해 보기!" : "");
+  if (mission){
+    /* the Spanish inside the mission is read by the Spanish voice */
+    const g = p.row("say", { ko: "🎯 미션: " + mission });
+    const parts = ("오늘의 미션! " + sayWhy(mission)).split(/([¡¿]?[A-Za-zÁÉÍÓÚÑÜáéíóúñü][A-Za-zÁÉÍÓÚÑÜáéíóúñü ,']*[A-Za-zÁÉÍÓÚÑÜáéíóúñü][.!?]*)/);
+    const said = parts.map((x, k) => ({ x: x, es: k % 2 === 1 })).filter((o) => cleanStr(o.x) && !/^[\s.,!?]+$/.test(o.x));
+    /* a beat after the Spanish to echo it, and after the last piece */
+    said.forEach((o, k) => p.seg(g, o.es ? "es" : "ko", o.x, o.es || k === said.length - 1 ? 1.0 : Q.role));
+  }
+  pSay(p, c.outro, Q.lead);
+  return [p];
+}
+
+/* Parts → one flat segment list and the display rows, ids made global. A row
+   that ended up with no segment is dropped: the timeline needs every row to
+   start somewhere. */
+function partsJoin(parts){
+  const segs = [], rows = [];
+  let base = 0, sid = 0;
+  for (const p of parts){
+    const used = new Set(p.segs.map((s) => s.gid));
+    let top = 0;
+    for (const r of p.rows){
+      top = Math.max(top, r.gid);
+      if (!used.has(r.gid)) continue;
+      const o = Object.assign({}, r, { gid: "g" + (base + r.gid), sectionId: p.part.id, sectionTitle: p.part.title });
+      for (const k of Object.keys(o)) if (o[k] === undefined) delete o[k];
+      rows.push(o);
+    }
+    for (const s of p.segs){
+      sid++;
+      segs.push(Object.assign({}, s, { id: "s" + sid, gid: "g" + (base + s.gid),
+                                       sectionId: p.part.id, sectionTitle: p.part.title }));
+    }
+    base += top;
+  }
+  for (let i = 0; i < segs.length - 1; i++){
+    if (segs[i].sectionId !== segs[i + 1].sectionId) segs[i].pauseAfter += Q.section;
+  }
+  return { segs: segs, rows: rows };
+}
+const partsMs = (list) => list.reduce((n, p) => n + p.ms(), 0);
+
+/* `prev`, when given, is the saved lesson before this one: the warm-up quizzes
+   it. `cur` is the day's course plan (curriculumPlan). */
+function lessonBuild(content, when, prev, cur){
   const iso = studyDate(when);
   const dateLabel = Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) + "일";
-
+  const recent = cur && asObj(cur.recent) ? cur.recent : null;
+  const G = cur && cur.grammar ? cur.grammar : null;
   const plan = reviewPlan(prev, iso);
   const wordQuiz = cur && Array.isArray(cur.wordReview) ? cur.wordReview : [];
-  const R = (plan ? plan.items.length : 0) + wordQuiz.length;
-  const G = cur && cur.grammar ? cur.grammar : null;
-  const step = G ? GRAMMAR_STEPS[G.idx] : null;
-  /* something 0교시 just reviewed is said once today, not three times */
-  const reviewed = new Set(plan ? plan.items.map((it) => it.key) : []);
-  const again = (es) => reviewed.size > 0 && reviewed.has(reviewKey(String(es || "").replace(/\s*…$/, "")));
-  /* taught in full on one of the last KNOWN_DAYS days (taughtRecent): once,
-     short. What is taught in full today goes into `taught` for curriculumCommit. */
-  const recent = cur && asObj(cur.recent) ? cur.recent : null;
-  const knownT = (t, es) => !!(recent && recent[taughtId(t, es)]);
-  const taught = [];
-  const teach = (t, es) => { if (cleanStr(es)) taught.push({ t: t, es: cleanStr(es).replace(/\s*…$/, "") }); };
-  const dn = dayNum(iso);
-  /* trim 1: words twice, not three times; trim 2: also no memory hooks and one
-     sentence of why — only when the lesson ran past LESSON_MAX_MS */
-  const reps = trim ? 2 : 3;
-  const turnRow = (sec, key) => {
-    const t = pickSay(TURN[key], dn);
-    const gg = row(sec, "say", { ko: t });
-    seg(sec, gg, "ko", t, P.lead);
+  const BADGE = { frame: "어제 뼈대", idiom: "어제 숙어", sent: "어제 문장", expr: "어제 표현" };
+  const quiz = (plan ? plan.items.map((it) => ({ es: it.es, ko: it.ko, badge: BADGE[it.type] || "어제 표현" })) : [])
+    .concat(wordQuiz.map((w) => ({ es: w.es, ko: w.ko, badge: w.when === "week" ? "지난주 단어" : "지난번 새 단어" })));
+  const pp = pronounPlan(content.pronoun, iso, recent);
+  const ctx = {
+    content: content, iso: iso, dateLabel: dateLabel, dn: dayNum(iso), plan: plan, quiz: quiz,
+    step: G ? GRAMMAR_STEPS[G.idx] : null,
+    knownT: (t, es) => !!(recent && recent[taughtId(t, es)]),
+    pron: pp.quiz.slice(0, PRON_QUIZ),
+    pronPts: pp.points.slice(0, 2)
   };
-  const nextLead = (i) => (i === 0 ? ordKo(1) + ". " : pickSay(NEXT_SAY.concat([ordKo(i + 1) + ". "]), dn + i));
 
-  /* intro */
-  const parts = [];
-  if (NW) parts.push("새 단어 " + NW + "개");
-  if (step) parts.push("문법은 ‘" + step.title.split(" — ")[0] + "’");
-  if (W) parts.push((NW ? "대화 단어 " : "단어 ") + W + "개");
-  if (W || I) parts.push("보너스 숙어 " + I + "개");
-  if (W || S) parts.push("문장 " + S + "개");
-  if (F) parts.push("말의 뼈대 " + F + "개");
-  const introText = dateLabel + " 스페인어 수업입니다. " +
-    (R ? "먼저 " + (plan ? (plan.yesterday ? "어제" : "지난 수업에서") : "지난번에") +
-         " 배운 표현 " + R + "개를 복습하고, 오늘은 " : "오늘은 ") +
-    parts.join(", ") + (parts.length ? ", 그리고 " : "") + "lo·le·se 연습" +
-    "입니다. 눈 감고, 들리는 대로 따라 하세요.";
-  let g = row(SEC.intro, "say", { ko: introText });
-  seg(SEC.intro, g, "ko", introText, P.intro);
-
-  /* 0교시 — yesterday, as a quiz: the meaning, a gap to answer, the answer.
-     On screen the Spanish stays covered until its segment plays. The new
-     words of the last day, and a couple from about a week ago, come after. */
-  if (plan || wordQuiz.length){
-    const label = plan ? plan.label : isoLabel(wordQuiz[0].d);
-    const Y = { id: SEC.yday.id, title: SEC.yday.title + " (" + label + ")" };
-    const BADGE = { frame: "어제 뼈대", idiom: "어제 숙어", sent: "어제 문장" };
-    const lead = plan ? plan.lead : "먼저 지난번에 배운 새 단어를 복습할게요. " + REVIEW_HOW;
-    g = row(Y, "say", { ko: lead });
-    seg(Y, g, "ko", lead, P.lead);
-    for (const it of (plan ? plan.items : [])){
-      const parts = reviewSegs(it);
-      g = row(Y, "pair", { es: it.show, ko: it.ko, badge: BADGE[it.type], quiz: true });
-      let exRow = null;
-      for (const s of parts){
-        if (s.ex && !exRow) exRow = row(Y, "pair", { es: it.ex.es, ko: it.ex.ko, badge: "바꿔 끼우기" });
-        seg(Y, s.ex ? exRow : g, s.speaker, s.text, s.pause);
-      }
-    }
-    if (wordQuiz.length){
-      if (plan){
-        g = row(Y, "say", { ko: "이번엔 새 단어예요." });
-        seg(Y, g, "ko", "이번엔 새 단어예요.", P.lead);
-      }
-      for (const w of wordQuiz) quizRow(Y, w, w.when === "week" ? "지난주 단어" : "지난번 새 단어");
-    }
-    g = row(Y, "say", { ko: REVIEW_END });
-    seg(Y, g, "ko", REVIEW_END, P.lead);
+  /* the fixed parts once; the three elastic ones at every level, and the
+     combination nearest 20:00 — with a lighter pull towards each part's slot */
+  const cools = [0, 1].map((l) => buildCool(ctx, l));
+  const warms = [0, 1].map((l) => buildWarm(ctx, l));
+  const cheats = [0, 1, 2, 3, 4].map((l) => buildCheat(ctx, l));
+  const stories = [0, 1, 2, 3, 4].map((l) => buildStory(ctx, l));
+  const chals = [1, 2, 3, 4, 5].map((n) => buildChallenge(ctx, n));
+  const ms = new Map();
+  for (const list of [].concat(cools, warms, cheats, stories, chals)) ms.set(list, partsMs(list));
+  const off = (list, part) => Math.abs(ms.get(list) - part.slot);
+  let best = null;
+  for (const w of warms) for (const a of cheats) for (const b of stories) for (const d of chals) for (const e of cools){
+    const total = ms.get(w) + ms.get(a) + ms.get(b) + ms.get(d) + ms.get(e);
+    const cost = Math.abs(total - LESSON_TARGET_MS) +
+      0.3 * (off(w, PARTS.warm) + off(a, PARTS.cheat) + off(b, PARTS.story) + off(d, PARTS.challenge) + off(e, PARTS.cool));
+    if (!best || cost < best.cost) best = { cost: cost, parts: [].concat(w, a, b, d, e), estMs: total };
   }
+  const joined = partsJoin(best.parts);
 
-  /* 1교시 — today's new words from the course list: the meaning, the word
-     three times, one easy example, now / already / going-to for a verb */
-  if (NW){
-    const lead0 = "오늘의 새 단어 " + NW + "개예요." +
-      (cur && cur.wordsAgain ? " 목록을 한 바퀴 다 돌아서, 오래전에 배운 단어도 다시 꺼냈어요." : "") +
-      " 들릴 때마다 소리 내어 따라 하세요.";
-    g = row(SEC.newwords, "say", { ko: lead0 });
-    seg(SEC.newwords, g, "ko", lead0, P.lead);
-    newWords.forEach((w, i) => {
-      const lead = ordKo(i + 1) + ". " + w.ko + ".";
-      g = row(SEC.newwords, "lead", { ko: lead });
-      seg(SEC.newwords, g, "ko", plain(lead), P.lead);
-      g = row(SEC.newwords, "pair", { es: w.es, ko: w.ko, badge: "×3" });
-      for (let k = 0; k < 3; k++){
-        seg(SEC.newwords, g, "es", w.es, P.wordEs);
-        seg(SEC.newwords, g, "ko", plain(w.ko), k === 2 ? P.wordKoLast : P.wordKo);
-      }
-      if (w.ex){
-        g = row(SEC.newwords, "pair", { es: w.ex.es, ko: w.ex.ko, badge: "예문" });
-        seg(SEC.newwords, g, "es", w.ex.es, P.frameEs);
-        seg(SEC.newwords, g, "ko", w.ex.ko, P.frameKo);
-      }
-      if (w.times && w.times.length){
-        tableRow(SEC.newwords, "지금 · 이미 · 앞으로",
-          "지금, 이미 끝난 일, 앞으로 할 일로 들어 볼게요.", w.times);
-      }
-      enLine(SEC.newwords, w);
-    });
-  }
-
-  /* «아는 것»: a cue, then each one once — Spanish, Korean, nothing more */
-  function knownGroup(sec, key, list){
-    if (!list.length) return;
-    const cue = pickSay(KNOWN_SAY[key], dn);
-    g = row(sec, "say", { ko: cue });
-    seg(sec, g, "ko", cue, P.lead);
-    for (const x of list){
-      g = row(sec, "pair", { es: x.es, ko: x.ko, badge: "아는 것", from: x.from || undefined });
-      seg(sec, g, "es", x.es, P.reviewEs);
-      seg(sec, g, "ko", plain(x.ko), P.reviewKo);
-    }
-  }
-
-  /* 2교시 — each word three times; one taught in the last few days, once */
-  const wordsNew = content.words.filter((w) => again(w.es) || !knownT("v", w.es));
-  const wordsKnown = content.words.filter((w) => !again(w.es) && knownT("v", w.es));
-  if (wordsNew.length && (NW || plan || wordQuiz.length)) turnRow(SEC.words, "words");
-  wordsNew.forEach((w, i) => {
-    const lead = nextLead(i) + w.ko + "." + (w.note ? " " + w.note : "");
-    g = row(SEC.words, "lead", { ko: lead });
-    seg(SEC.words, g, "ko", lead, P.lead);
-
-    const n = again(w.es) ? 1 : reps;
-    g = row(SEC.words, "pair", { es: w.es, ko: w.ko, badge: n === 1 ? "어제 복습" : "×" + n });
-    for (let k = 0; k < n; k++){
-      seg(SEC.words, g, "es", w.es, P.wordEs);
-      seg(SEC.words, g, "ko", w.ko, k === n - 1 ? P.wordKoLast : P.wordKo);
-    }
-    enLine(SEC.words, w);
-    if (n > 1) teach("v", w.es);
-  });
-  knownGroup(SEC.words, "words", wordsKnown);
-
-  /* 2교시 — expressions branching off those words */
-  const idiomsNew = content.idioms.filter((x) => again(x.es) || !knownT("i", x.es));
-  const idiomsKnown = content.idioms.filter((x) => !again(x.es) && knownT("i", x.es));
-  idiomsNew.forEach((x, i) => {
-    const lead = "보너스 " + ordKo(i + 1) + ". " + x.ko + "." + (x.note ? " " + x.note : "");
-    g = row(SEC.idioms, "lead", { ko: lead, from: x.from });
-    seg(SEC.idioms, g, "ko", lead, P.lead);
-
-    const n = again(x.es) ? 1 : reps;
-    g = row(SEC.idioms, "pair", { es: x.es, ko: x.ko, badge: n === 1 ? "어제 복습" : "×" + n, from: x.from });
-    for (let k = 0; k < n; k++){
-      seg(SEC.idioms, g, "es", x.es, P.wordEs);
-      seg(SEC.idioms, g, "ko", x.ko, k === n - 1 ? P.wordKoLast : P.wordKo);
-    }
-    if (n > 1){
-      enLine(SEC.idioms, x);
-      whyBlock(SEC.idioms, x.literal, x.why);
-      exampleRows(SEC.idioms, x.examples, trim ? 1 + (trim < 2 ? 1 : 0) : 3, "쉬운 예문으로 들어 볼게요.");
-      teach("i", x.es);
-    }
-  });
-  knownGroup(SEC.idioms, "idioms", idiomsKnown);
-
-  /* 4교시 — word by word: what each word means, why it has this shape, a way to
-     remember it. A word already explained earlier in this lesson is skipped; one
-     explained on a recent day, or taught in 2교시 today, is said short. Every so
-     often one word is a «맞혀 보세요» with a gap before the answer. */
-  const talkedV = new Set(content.words.map((w) => foldEs(w.es)));
-  const wordsSeen = new Set();
-  const isSmall = (w) => !w.tip && foldEs(w.es).length <= 3;
-  function sentWords(s, i, short){
-    let guessed = false;
-    let shown = 0;
-    for (const w of s.words){
-      const fk = foldEs(w.es);
-      if (wordsSeen.has(fk)) continue;
-      const recentW = knownT("w", w.es);
-      if (short && (recentW || shown >= 2)) continue;     // a sentence seen before: the new bits only
-      wordsSeen.add(fk);
-      shown++;
-      const brief = recentW || (short && !w.why);
-      const why = brief ? "" : (talkedV.has(fk) || short || trim > 1) ? firstSentences(w.why, 1, WHY_CHARS) : w.why;
-      const tip = brief || trim > 1 || short ? "" : w.tip;
-      /* the quiz: on every other sentence, the first word worth guessing */
-      const guess = !guessed && !short && !brief && i % 2 === 0 && !isSmall(w) && !!why;
-      if (guess){
-        guessed = true;
-        const q = pickSay(GUESS_SAY, dn + i);
-        g = row(SEC.sents, "say", { ko: "🤔 " + q });
-        seg(SEC.sents, g, "ko", q, P.lead);
-        seg(SEC.sents, g, "es", w.es, P.guess);
-      }
-      g = row(SEC.sents, "pair", { es: w.es, ko: w.ko, badge: brief ? "아는 단어" : "단어" });
-      if (guess) seg(SEC.sents, g, "ko", pickSay(ANSWER_SAY, dn + i) + plain(w.ko) + ".", P.oneMean);
-      else {
-        seg(SEC.sents, g, "es", w.es, P.oneEs);
-        seg(SEC.sents, g, "ko", plain(w.ko), brief ? P.reviewKo : P.oneMean);
-      }
-      if (why){
-        g = row(SEC.sents, "note", { ko: why });
-        seg(SEC.sents, g, "ko", plain(why), P.why);
-      }
-      if (tip){
-        g = row(SEC.sents, "note", { ko: "💡 " + tip });
-        seg(SEC.sents, g, "ko", pickSay(TIP_SAY, dn + i + shown) + plain(tip), P.why);
-      }
-      if (why) teach("w", w.es);
-    }
-  }
-
-  /* 4교시 ④: a set of words that go together — what they say one by one, and
-     what they really mean. A chunk the words above already read out as one
-     item is not read again; only its literal line is added. */
-  const CHUNK_WHY_MAX = 2;
-  function chunkWhy(s){
-    let n = 0;
-    for (const c of (Array.isArray(s.chunks) ? s.chunks : [])){
-      if (!c.literal || n >= CHUNK_WHY_MAX) continue;
-      n++;
-      if (!wordsSeen.has(foldEs(c.es))){
-        g = row(SEC.sents, "pair", { es: c.es, ko: c.ko, badge: "덩어리" });
-        seg(SEC.sents, g, "es", c.es, P.oneEs);
-        seg(SEC.sents, g, "ko", plain(c.ko), P.oneMean);
-      }
-      g = row(SEC.sents, "note", { ko: "글자 그대로: " + c.literal + " → 실제로는 " + c.ko });
-      seg(SEC.sents, g, "ko", "글자 그대로는 " + sayWhy(c.literal).replace(/[.。]\s*$/, "") +
-          ", 실제로는 " + plain(c.ko) + ".", P.why);
-      if (c.note){
-        g = row(SEC.sents, "note", { ko: c.note });
-        seg(SEC.sents, g, "ko", sayWhy(c.note), P.why);
-      }
-    }
-  }
-
-  content.sentences.forEach((s, i) => {
-    const words = Array.isArray(s.words) ? s.words : [];
-    /* seen on a recent day, or quizzed in 0교시 a few minutes ago: the core only */
-    /* quizzed in 0교시 a few minutes ago: once more as a whole, and on */
-    if (again(s.es)){
-      const l0 = "아까 복습한 문장이에요. 한 번 더 들어 볼게요.";
-      g = row(SEC.sents, "lead", { ko: l0, badge: "어제 복습" });
-      seg(SEC.sents, g, "ko", l0, P.sentLead);
-      g = row(SEC.sents, "full", { es: s.es, ko: s.ko });
-      seg(SEC.sents, g, "es", s.es, P.sentMean);
-      seg(SEC.sents, g, "ko", s.ko, P.sentMean);
-      return;
-    }
-    const short = knownT("s", s.es);
-    const lead = short ? "지난번에 본 문장이에요. 핵심만 짚을게요."
-      : i === 0 ? ordKo(1) + " 문장입니다." : pickSay(SENT_SAY.concat([ordKo(i + 1) + " 문장입니다."]), dn + i);
-    if (i === 0 && words.length && !short) turnRow(SEC.sents, "sents");
-    g = row(SEC.sents, "lead", short ? { ko: lead, badge: "지난번 문장" } : { ko: lead });
-    seg(SEC.sents, g, "ko", lead, P.sentLead);
-
-    g = row(SEC.sents, "slow", { es: s.es, badge: "느리게" });
-    seg(SEC.sents, g, "es", s.es, P.sentSlow, SLOW_RATE);
-
-    g = row(SEC.sents, "say", { ko: s.ko });
-    seg(SEC.sents, g, "ko", s.ko, P.sentMean);
-
-    /* ② how the order differs from Korean */
-    if (s.order && !short){
-      g = row(SEC.sents, "note", { ko: "🔀 " + s.order });
-      seg(SEC.sents, g, "ko", "순서를 볼게요. " + sayOrder(s.order), P.why);
-    }
-
-    if (words.length){
-      /* ③ word by word */
-      sentWords(s, i, short);
-      /* ④ the pieces that travel together: what they say, what they mean */
-      if (!short && trim < 2) chunkWhy(s);
-      /* the verb tables of its chunks stay: now / already / going-to side by side */
-      if (!short) for (const c of s.chunks){
-        if (c.times && c.times.length){
-          tableRow(SEC.sents, "지금 · 이미 · 앞으로",
-            "지금, 이미 끝난 일, 앞으로 할 일로 나란히 들어 볼게요.", c.times);
-        }
-      }
-      /* ⑤ one change at a time */
-      if (!short) swapRows(SEC.sents, s.swaps, trim ? 2 : MAX_SWAPS);
-      if (s.fun && !short){
-        g = row(SEC.sents, "say", { ko: "🇲🇽 " + s.fun });
-        seg(SEC.sents, g, "ko", pickSay(FUN_SAY, dn + i) + plain(s.fun), P.note);
-      }
-      g = row(SEC.sents, "full", { es: s.es, ko: s.ko, badge: short ? "" : "×2" });
-      seg(SEC.sents, g, "es", s.es, P.full);
-      if (!short) seg(SEC.sents, g, "es", s.es, P.full);
-      if (!short) teach("s", s.es);
-      return;
-    }
-    if (short){
-      g = row(SEC.sents, "full", { es: s.es, ko: s.ko });
-      seg(SEC.sents, g, "es", s.es, P.full);
-      return;
-    }
-    teach("s", s.es);
-
-    s.chunks.forEach((c) => {
-      if (c.note){
-        g = row(SEC.sents, "note", { ko: c.note });
-        seg(SEC.sents, g, "ko", c.note, P.note);
-      }
-      g = row(SEC.sents, "pair", { es: c.es, ko: c.ko, badge: "×2" });
-      seg(SEC.sents, g, "es", c.es, P.chunkEs);
-      seg(SEC.sents, g, "ko", c.ko, P.chunkKo);
-      seg(SEC.sents, g, "es", c.es, P.chunkEs);
-      enLine(SEC.sents, c);
-      if (c.times && c.times.length){
-        tableRow(SEC.sents, "지금 · 이미 · 앞으로",
-          "지금, 이미 끝난 일, 앞으로 할 일로 나란히 들어 볼게요.", c.times);
-      }
-    });
-    swapRows(SEC.sents, s.swaps, trim ? 2 : MAX_SWAPS);
-
-    g = row(SEC.sents, "full", { es: s.es, ko: s.ko, badge: "×2" });
-    seg(SEC.sents, g, "es", s.es, P.full);
-    seg(SEC.sents, g, "es", s.es, P.full);
-  });
-
-  /* 5교시 — one step of the grammar course. The last two steps first, in a
-     line each; then today's: plain words, the rule in one line, examples, a
-     small table, English, and two quiz lines. Whatever Gemini did not write
-     falls back to the step's own rule and examples, so the step is never
-     skipped. */
-  if (step){
-    const gc = content.grammar || null;
-    if (G.recap.length){
-      g = row(SEC.grammar, "say", { ko: "지난 문법 다시 보기예요." });
-      seg(SEC.grammar, g, "ko", "지난 문법 다시 보기예요.", P.lead);
-      for (const r of G.recap){
-        const st = GRAMMAR_STEPS[r], x = st.ex[0];
-        g = row(SEC.grammar, "pair", { es: x.es, ko: x.ko, badge: st.title.split(" — ")[0] });
-        seg(SEC.grammar, g, "ko", sayKo(st.rule), P.lead);
-        seg(SEC.grammar, g, "es", x.es, P.frameEs);
-        seg(SEC.grammar, g, "ko", x.ko, P.frameKo);
-      }
-    }
-    const head = "오늘의 문법, " + ordKo(G.idx + 1) + " 칸이에요. " + step.title.replace(" — ", ", ") + "." +
-      (G.round > 0 ? " 한 바퀴를 다 돌아서, 이번은 복습 회차예요." : "");
-    g = row(SEC.grammar, "lead", { ko: head, badge: circNum(G.idx + 1) + "/" + G.total });
-    seg(SEC.grammar, g, "ko", sayKo(head), P.lead);
-    for (const line of (gc ? gc.explain : [])){
-      g = row(SEC.grammar, "say", { ko: line });
-      seg(SEC.grammar, g, "ko", sayKo(line), P.note);
-    }
-    if (gc && gc.literal) whyBlock(SEC.grammar, gc.literal, "");
-    const rule = (gc && gc.rule) || step.rule;
-    g = row(SEC.grammar, "note", { ko: "규칙: " + rule });
-    seg(SEC.grammar, g, "ko", "규칙 한 줄. " + sayKo(rule), P.sentMean);
-    const exs = gc && gc.examples.length >= 2 ? gc.examples : step.ex;
-    exs.forEach((x, k) => {
-      g = row(SEC.grammar, "pair", { es: x.es, ko: x.ko, badge: "예문" });
-      if (k === 0) seg(SEC.grammar, g, "ko", "예문으로 들어 볼게요.", P.lead);
-      seg(SEC.grammar, g, "es", x.es, P.frameEs);
-      seg(SEC.grammar, g, "ko", x.ko, P.frameKo);
-    });
-    if (gc && gc.table.length) tableRow(SEC.grammar, "한눈에 보기", "표로 한 번에 볼게요.", gc.table);
-    if (gc) enLine(SEC.grammar, gc);
-    const quiz = gc && gc.quiz.length ? gc.quiz : step.ex.map((x) => ({ es: x.es, ko: x.ko }));
-    g = row(SEC.grammar, "say", { ko: "퀴즈예요. " + REVIEW_HOW });
-    seg(SEC.grammar, g, "ko", "퀴즈예요. " + REVIEW_HOW, P.lead);
-    for (const q of quiz) quizRow(SEC.grammar, q, "퀴즈");
-  }
-
-  /* 6교시 — lo·le·se, every lesson, about two minutes: today's own lines when
-     they carry one, else the base set; who gets it, what is given; three
-     quiz lines. */
-  {
-    const pp = pronounPlan(content.pronoun, iso, recent);
-    for (const x of pp.points.concat(pp.quiz)) teach("p", x.es);
-    g = row(SEC.pron, "say", { ko: PRON_LEAD });
-    seg(SEC.pron, g, "ko", PRON_LEAD, P.lead);
-    for (const p of pp.points){
-      g = row(SEC.pron, "pair", { es: p.es, ko: p.ko, badge: p.today ? "오늘 문장" : "예문" });
-      seg(SEC.pron, g, "es", p.es, P.frameEs);
-      seg(SEC.pron, g, "ko", p.ko, P.frameKo);
-      const ask = [p.who ? "누구에게? " + p.who : "", p.what ? "무엇을? " + p.what : ""].filter(Boolean);
-      if (ask.length){
-        g = row(SEC.pron, "note", { ko: ask.join(" · ") });
-        seg(SEC.pron, g, "ko", ask.join(". ") + ".", P.note);
-      }
-    }
-    g = row(SEC.pron, "say", { ko: PRON_QUIZ_LEAD });
-    seg(SEC.pron, g, "ko", PRON_QUIZ_LEAD, P.lead);
-    for (const q of pp.quiz) quizRow(SEC.pron, q, "퀴즈");
-  }
-
-  /* 7교시 — the bones of speaking: what glues sentences, and the openings you
-     keep while swapping the verb. Meaning, today's real use, swapped examples,
-     then the same frame for each person. */
-  if (frames.length && frames.some((f) => !again(f.es) && !knownT("f", f.es))) turnRow(SEC.frames, "frames");
-  frames.forEach((f, i) => {
-    /* reviewed in 0교시 a few minutes ago, or taught on a recent day: once,
-       short, and today's real use only */
-    const was = again(f.es);
-    if (was || knownT("f", f.es)){
-      const lead = ordKo(i + 1) + " 뼈대. " + f.ko + ". " +
-        (was ? "아까 어제 복습에서 했던 틀이에요." : "최근에 배운 틀이에요.");
-      g = row(SEC.frames, "lead", { ko: lead });
-      seg(SEC.frames, g, "ko", sayKo(lead), P.lead);
-      g = row(SEC.frames, "pair", { es: f.type === "link" ? f.es : f.es + " …", ko: f.ko, badge: was ? "어제 복습" : "아는 것" });
-      seg(SEC.frames, g, "es", f.es, P.frameEs);
-      seg(SEC.frames, g, "ko", sayKo(f.ko), P.frameKo);
-      if (f.today){
-        g = row(SEC.frames, "pair", { es: f.today.es, ko: f.today.ko, badge: "오늘 문장" });
-        seg(SEC.frames, g, "es", f.today.es, P.frameEs);
-        seg(SEC.frames, g, "ko", f.today.ko, P.frameKo);
-      }
-      return;
-    }
-    const lead = ordKo(i + 1) + " 뼈대. " + (f.type === "link" ? "이어 주는 말, " : "") + f.ko + "." +
-      (f.note ? " " + f.note : "") +
-      (f.today ? "" : " 오늘 문장에는 없었지만, 오늘 말에 붙여 쓰기 좋은 틀이에요.");
-    g = row(SEC.frames, "lead", { ko: lead });
-    seg(SEC.frames, g, "ko", sayKo(lead), P.lead);
-
-    teach("f", f.es);
-    g = row(SEC.frames, "pair", { es: f.type === "link" ? f.es : f.es + " …", ko: f.ko, badge: "×2" });
-    seg(SEC.frames, g, "es", f.es, P.frameEs);
-    seg(SEC.frames, g, "ko", sayKo(f.ko), P.frameKo);
-    seg(SEC.frames, g, "es", f.es, P.frameEs);
-    enLine(SEC.frames, f);
-    if (trim < 2) whyBlock(SEC.frames, f.literal, f.why);
-
-    if (f.today){
-      g = row(SEC.frames, "pair", { es: f.today.es, ko: f.today.ko, badge: "오늘 문장" });
-      seg(SEC.frames, g, "ko", "오늘 문장에서는 이렇게 나왔어요.", P.lead);
-      seg(SEC.frames, g, "es", f.today.es, P.frameEs);
-      seg(SEC.frames, g, "ko", f.today.ko, P.frameKo);
-    }
-    f.swaps.forEach((x, k) => {
-      g = row(SEC.frames, "pair", { es: x.es, ko: x.ko, badge: "바꿔 끼우기" });
-      if (k === 0) seg(SEC.frames, g, "ko", "바꿔 끼워 볼게요.", P.lead);
-      seg(SEC.frames, g, "es", x.es, P.frameEs);
-      seg(SEC.frames, g, "ko", x.ko, P.frameKo);
-    });
-    if (f.forms && f.forms.length){
-      tableRow(SEC.frames, "누가 하느냐에 따라",
-        "누가 하느냐에 따라 모양이 바뀌어요. 나, 너, 그 사람, 우리 순서예요.", f.forms);
-    }
-  });
-
-  /* 마무리 — every new word and every word once more, quickly, then every frame.
-     Only what was taught in full today: a «아는 것» was just said once already. */
-  const fullToday = new Set(taught.map((x) => x.t + ":" + reviewKey(x.es)));
-  const inReview = (t, es) => !recent || again(es) ||
-    fullToday.has(t + ":" + reviewKey(String(es).replace(/\s*…$/, "")));
-  const revWords = content.words.filter((w) => inReview("v", w.es));
-  const revFrames = frames.filter((f) => inReview("f", f.es));
-  if (recent && newWords.length + revWords.length + revFrames.length) turnRow(SEC.review, "review");
-  newWords.forEach((w) => {
-    g = row(SEC.review, "pair", { es: w.es, ko: w.ko });
-    seg(SEC.review, g, "es", w.es, P.reviewEs);
-    seg(SEC.review, g, "ko", plain(w.ko), P.reviewKo);
-  });
-  revWords.forEach((w) => {
-    g = row(SEC.review, "pair", { es: w.es, ko: w.ko });
-    seg(SEC.review, g, "es", w.es, P.reviewEs);
-    seg(SEC.review, g, "ko", w.ko, P.reviewKo);
-  });
-  revFrames.forEach((f) => {
-    g = row(SEC.review, "pair", { es: f.type === "link" ? f.es : f.es + " …", ko: f.ko });
-    seg(SEC.review, g, "es", f.es, P.reviewEs);
-    seg(SEC.review, g, "ko", sayKo(f.ko), P.reviewKo);
-  });
-
-  /* outro */
-  g = row(SEC.outro, "say", { ko: content.outro });
-  seg(SEC.outro, g, "ko", content.outro, P.outro);
-
-  /* a beat of air between lessons */
-  for (let i = 0; i < segs.length - 1; i++){
-    if (segs[i].sectionId !== segs[i + 1].sectionId) segs[i].pauseAfter += P.section;
-  }
-
-  /* what curriculumCommit records once this lesson is saved; the counts are
-     what the footer shows — the totals as they will stand after this lesson */
+  const taught = [], newUsed = [];
+  for (const p of best.parts){ taught.push(...p.taught); newUsed.push(...p.newUsed); }
+  /* targets that only exist inside a known item were not claimed as new words */
   const oldOnes = cur && Array.isArray(cur.oldWords) ? cur.oldWords : [];
-  const learnedNow = cur ? cur.learnedBefore + newWords.filter((w) => oldOnes.indexOf(w.es) < 0).length : 0;
+  const learnedNow = cur ? cur.learnedBefore + newUsed.filter((w) => oldOnes.indexOf(w.es) < 0).length : 0;
   const course = cur ? {
     iso: iso,
-    newWords: newWords.map((w) => ({ es: w.es, ko: w.ko })),
+    newWords: newUsed.map((w) => ({ es: w.es, ko: w.ko })),
     grammar: G ? { k: G.k, idx: G.idx } : null,
     taught: taught
   } : null;
 
-  /* a lesson that ran long is built again with fewer repeats (see `reps`) —
-     the length is the same estimate the device player draws its bar with */
-  if (trim < 2){
-    const ms = segs.reduce((n, s) => n + estimateMs(s) + s.pauseAfter * 1000, 0);
-    if (ms > LESSON_MAX_MS) return lessonBuild(content, when, prev, cur, trim + 1);
-  }
-
+  const titles = {};
+  for (const p of best.parts) titles[p.part.id] = p.part.title;
   return Object.assign({
-    date: iso, dateLabel: dateLabel,
-    counts: Object.assign({ words: W, idioms: I, sentences: S, frames: F },
-                          (plan || wordQuiz.length) ? { review: R } : {},
-                          cur ? { newWords: NW, learned: learnedNow } : {},
-                          G ? { grammarAt: G.idx + 1, grammarOf: G.total } : {}),
+    fmt: LESSON_FMT, date: iso, dateLabel: dateLabel, parts: titles,
+    counts: Object.assign({ words: 0, idioms: taught.filter((x) => x.t === "i").length,
+                            sentences: content.takeaway ? 1 : 0, frames: content.frames.length,
+                            targets: content.targets.length, story: content.story.lines.length,
+                            challenge: content.challenge.length + ctx.pron.length },
+                          quiz.length ? { review: ctx.reviewN } : {},
+                          cur ? { newWords: newUsed.length, learned: learnedNow } : {},
+                          G ? { grammarAt: G.idx + 1, grammarOf: GRAMMAR_STEPS.length } : {}),
     reviewOf: plan ? plan.date : "",
-    segments: segs, rows: rows
+    segments: joined.segs, rows: joined.rows
   }, course ? { curriculum: course } : {});
+}
+
+/* «03:05~08:12 · ② 치트키 1»: the real span of each part of a story20 lesson,
+   from the timeline just computed — estimated in device mode, exact in mp3. */
+function clockMmSs(ms){
+  const t = Math.max(0, Math.round(ms / 1000));
+  return String(Math.floor(t / 60)).padStart(2, "0") + ":" + String(t % 60).padStart(2, "0");
+}
+function lessonPartTimes(lesson){
+  const span = {};
+  for (const s of lesson.segments){
+    const x = span[s.sectionId] || (span[s.sectionId] = { a: s.start, b: s.end });
+    x.a = Math.min(x.a, s.start);
+    x.b = Math.max(x.b, s.end);
+  }
+  const titles = asObj(lesson.parts) || {};
+  const label = (id) => span[id] && titles[id]
+    ? clockMmSs(span[id].a) + "~" + clockMmSs(span[id].b) + " · " + titles[id] : null;
+  for (const r of lesson.rows){ const t = label(r.sectionId); if (t) r.sectionTitle = t; }
+  for (const s of lesson.segments){ const t = label(s.sectionId); if (t) s.sectionTitle = t; }
+}
+
+/* the footer and the exported file's subtitle */
+function lessonCountsText(c){
+  c = c || {};
+  if (c.targets != null){
+    return "표현 " + c.targets + (c.idioms ? " · 숙어 " + c.idioms : "") + (c.frames ? " · 뼈대 " + c.frames : "") +
+      " · 상황극 " + (c.story || 0) + "줄 · 챌린지 " + (c.challenge || 0);
+  }
+  return "단어 " + c.words + " · 숙어 " + c.idioms + " · 문장 " + c.sentences + (c.frames ? " · 뼈대 " + c.frames : "");
 }
 
 /* Start and end of every segment, and the boundary of every display row.
@@ -2097,6 +1740,7 @@ function lessonTimeline(lesson, sr){
     lesson.rows[i].until = (i + 1 < lesson.rows.length) ? lesson.rows[i + 1].start : total;
   }
   lesson.totalMs = total;
+  if (lesson.fmt === LESSON_FMT) lessonPartTimes(lesson);
   return lesson;
 }
 
@@ -2624,13 +2268,22 @@ async function lessonSynthesize(lesson, onProgress, onPhase){
   out.write(pad);
 
   const segs = lesson.segments;
+  const cues = new Map();
   for (let i = 0; i < segs.length; i++){
     const s = segs[i];
     const pcm = audio.get(cacheKey(s));
     if (!pcm) throw new Error("빠진 음성이 있습니다: " + s.text.slice(0, 20));
+    /* a story20 chime or tick goes right in front of its line and counts as
+       part of it, so the line's row lights up with its cue */
+    let cue = null;
+    if (s.cue && CUE_MS[s.cue]){
+      if (!cues.has(s.cue)) cues.set(s.cue, cuePcm(s.cue, sr));
+      cue = cues.get(s.cue);
+      out.write(cue);
+    }
     /* no rounding: this is the exact length of what was just written, and the
        timeline is the running sum of these */
-    s.audioMs = pcm.length / sr * 1000;
+    s.audioMs = ((cue ? cue.length : 0) + pcm.length) / sr * 1000;
     out.write(pcm);
     /* the pause after the last line is never written: the timeline ends at the
        last word, and trailing silence would leave the bar at 100% while the
@@ -3109,11 +2762,16 @@ function rowHtml(r, i, p){
   if (p == null) p = "L-";
   const cls = (n) => ' class="' + p + n + '"';
   const badge = r.badge ? "<span" + cls("badge") + ">" + esc(r.badge) + "</span>" : "";
-  const from = r.from ? "<span" + cls("from") + ">" + esc(r.from) + " &rarr;</span>" : "";
+  const from = (r.from ? "<span" + cls("from") + ">" + esc(r.from) + " &rarr;</span>" : "") +
+               (r.role ? "<span" + cls("role") + ">" + esc(r.role) + "</span>" : "");
+  /* a story20 line the learner answers or repeats, and the hand gesture to go
+     with it — both for the eye only, never spoken */
+  const cr = r.cr ? "<span" + cls("cr") + ">" + esc(r.cr) + "</span>" : "";
+  const gest = r.gesture ? "<div" + cls("gest") + ">✋ " + esc(r.gesture) + "</div>" : "";
   let inner;
   if (r.kind === "pair" || r.kind === "slow" || r.kind === "full"){
-    inner = "<div" + cls("es") + ">" + from + esc(r.es || "") + badge + "</div>" +
-            (r.ko ? "<div" + cls("ko") + ">" + esc(r.ko) + "</div>" : "");
+    inner = "<div" + cls("es") + ">" + from + esc(r.es || "") + badge + cr + "</div>" +
+            (r.ko ? "<div" + cls("ko") + ">" + esc(r.ko) + "</div>" : "") + gest;
   } else if (r.kind === "note"){
     inner = "<div" + cls("note") + ">" + esc(r.ko || "") + "</div>";
   } else if (r.kind === "en"){
@@ -3127,7 +2785,7 @@ function rowHtml(r, i, p){
     inner = (r.ko ? "<div" + cls("cap") + ">" + esc(r.ko) + "</div>" : "") +
             "<table" + cls("tbl") + ">" + t + "</table>";
   } else {
-    inner = "<div" + cls("say") + ">" + from + esc(r.ko || "") + badge + "</div>";
+    inner = "<div" + cls("say") + ">" + from + esc(r.ko || "") + badge + cr + "</div>" + gest;
   }
   return '<button class="' + p + "row " + r.kind + (r.quiz ? " quiz" : "") + '" data-i="' + i +
     '" type="button">' + inner + "</button>";
@@ -3284,8 +2942,7 @@ function renderFoot(){
     (l.counts.newWords ? "새 단어 누적 " + l.counts.learned + "개 · " : "") +
     (l.counts.grammarAt ? "문법 진도 " + circNum(l.counts.grammarAt) + "/" + l.counts.grammarOf + " · " : "") +
     (l.counts.review ? "복습 " + l.counts.review + " · " : "") +
-    "단어 " + l.counts.words + " · 숙어 " + l.counts.idioms + " · 문장 " + l.counts.sentences +
-    (l.counts.frames ? " · 뼈대 " + l.counts.frames : "") +
+    lessonCountsText(l.counts) +
     (current.blob ? " · " + sizeLabel(current.blob.size) : "") +
     (lset.chars && lset.chars.ym === monthNow() && lset.chars.n
       ? " · 이번 달 음성 " + lset.chars.n.toLocaleString("ko-KR") + "자" : "");
@@ -4836,6 +4493,9 @@ function exportHtml(lesson, b64){
       if (r.en) o.en = r.en;
       if (Array.isArray(r.table)) o.table = r.table;
       if (r.quiz){ o.quiz = true; o.reveal = ms1(r.reveal); }
+      if (r.cr) o.cr = r.cr;
+      if (r.role) o.role = r.role;
+      if (r.gesture) o.gesture = r.gesture;
       return o;
     }),
     segments: lesson.segments.map((s) => ({
@@ -4884,6 +4544,10 @@ function exportHtml(lesson, b64){
 '.badge{display:inline-block;margin-left:7px;font-size:10px;font-weight:700;color:var(--dim);',
 'border:1px solid var(--line);border-radius:6px;padding:1px 5px;vertical-align:2px}',
 '.from{color:var(--dim);font-size:12px;font-weight:600;margin-right:6px}',
+'.role{color:var(--ko);font-size:12px;font-weight:700;margin-right:7px}',
+'.cr{display:inline-block;margin-left:7px;font-size:10.5px;font-weight:700;color:var(--ok);',
+'border:1px solid rgba(93,219,164,.45);border-radius:6px;padding:1px 6px;vertical-align:2px}',
+'.gest{font-size:12px;color:var(--dim);margin-top:4px}',
 '.row.full .es,.row.slow .es{font-size:16px}',
 '.en{display:inline-block;font-size:11.5px;font-weight:700;color:#b9c7f5;background:rgba(124,150,255,.1);',
 'border:1px solid rgba(124,150,255,.3);border-radius:7px;padding:2px 7px}',
@@ -4903,9 +4567,7 @@ exportAskCss(),
 '<div class="sub">' + (lesson.counts.newWords ? '새 단어 ' + lesson.counts.newWords + ' · ' : '') +
   (lesson.counts.grammarAt ? '문법 ' + circNum(lesson.counts.grammarAt) + '/' + lesson.counts.grammarOf + ' · ' : '') +
   (lesson.counts.review ? '복습 ' + lesson.counts.review + ' · ' : '') +
-  '단어 ' + lesson.counts.words + ' · 숙어 ' + lesson.counts.idioms +
-  ' · 문장 ' + lesson.counts.sentences +
-  (lesson.counts.frames ? ' · 뼈대 ' + lesson.counts.frames : '') + ' · ' + fmtClock(lesson.totalMs) +
+  esc(lessonCountsText(lesson.counts)) + ' · ' + fmtClock(lesson.totalMs) +
   (b64 ? '' : ' · 기기 음성') + '</div></header>',
 '<div class="ctl">',
 '<div class="bar" id="bar"><i></i></div>',
