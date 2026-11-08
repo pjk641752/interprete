@@ -2207,7 +2207,86 @@ function ttsError(status, msg){
     head = "Cloud TTS 키에 권한이 없습니다 (키 제한 또는 결제 미연결). console.cloud.google.com 에서 키의 API 제한과 결제를 확인하십시오.\n\n";
   else if (status === 429)
     head = "Cloud TTS 키가 잠시 막혔습니다 — 요청 한도(할당량)에 걸렸습니다. 잠시 뒤 다시 하시거나 console.cloud.google.com 의 할당량을 확인하십시오. 기기 목소리로 바꿔도 됩니다.\n\n";
-  return new Error(head + "TTS " + status + "\n" + msg);
+  const err = new Error(head + "TTS " + status + "\n" + msg);
+  err.ttsStatus = status;
+  return err;
+}
+
+/* One short Korean line for a Cloud TTS failure, plus what to do about it.
+   "sticky" causes do not fix themselves (a wrong key, the API switched off,
+   no billing, a key restriction): those are remembered so the same failure
+   is not shouted at the user every day. Quota, timeouts and the network do
+   fix themselves, so they are never remembered. */
+const TTS_CAUSES = {
+  badkey:   { sticky: true,  short: "Cloud TTS 키가 올바르지 않습니다.",
+              fix: "설정 › 오디오 수업 음성에서 키를 다시 붙여 넣으십시오." },
+  disabled: { sticky: true,  short: "키의 구글 클라우드 프로젝트에서 Text-to-Speech API 가 꺼져 있습니다.",
+              fix: "console.cloud.google.com 에서 Text-to-Speech API 를 사용 설정하십시오." },
+  billing:  { sticky: true,  short: "키의 구글 클라우드 프로젝트에 결제가 연결되어 있지 않습니다.",
+              fix: "console.cloud.google.com → 결제(Billing)에서 결제 계정을 연결하십시오." },
+  denied:   { sticky: true,  short: "이 키에는 Text-to-Speech 를 쓸 권한이 없습니다 (키 제한 또는 결제).",
+              fix: "console.cloud.google.com 에서 키의 API 제한과 결제를 확인하십시오." },
+  quota:    { sticky: false, short: "Cloud TTS 요청 한도(할당량)에 잠시 걸렸습니다.",
+              fix: "잠시 뒤 다시 만드시면 됩니다." },
+  timeout:  { sticky: false, short: "Cloud TTS 가 제때 응답하지 않았습니다.",
+              fix: "인터넷이 잘 되는 곳에서 다시 만드시면 됩니다." },
+  network:  { sticky: false, short: "Cloud TTS 에 연결하지 못했습니다.",
+              fix: "인터넷 연결을 확인하신 뒤 다시 만드시면 됩니다." },
+  noaudio:  { sticky: false, short: "Cloud TTS 가 오디오를 돌려주지 않았습니다.",
+              fix: "잠시 뒤 다시 만드시면 됩니다." },
+  novoice:  { sticky: false, short: "이 키로 쓸 수 있는 목소리를 찾지 못했습니다.",
+              fix: "설정에서 «음성 확인» 을 눌러 보십시오." },
+  server:   { sticky: false, short: "구글 서버가 잠시 응답하지 못했습니다.",
+              fix: "잠시 뒤 다시 만드시면 됩니다." },
+  unknown:  { sticky: false, short: "원인을 알 수 없는 오류가 났습니다.",
+              fix: "아래 «자세히» 의 내용을 확인하십시오." }
+};
+
+function ttsCause(err){
+  const m = String((err && err.message) || err || "");
+  let st = (err && err.ttsStatus) || 0;
+  if (!st){ const h = /TTS (\d{3})/.exec(m); if (h) st = Number(h[1]); }
+  let code = "unknown";
+  if (st === 400 && /API key not valid|API_KEY_INVALID/i.test(m)) code = "badkey";
+  else if (st === 403 && /disabled|has not been used|SERVICE_DISABLED/i.test(m)) code = "disabled";
+  else if (st === 403 && /billing/i.test(m)) code = "billing";
+  else if (st === 403 || st === 401) code = "denied";
+  else if (st === 429) code = "quota";
+  else if (st >= 500) code = "server";
+  else if (/응답하지 않아 끊었습니다/.test(m)) code = "timeout";
+  else if (/연결하지 못했습니다/.test(m)) code = "network";
+  else if (/오디오가 없습니다|응답을 읽지 못했습니다/.test(m)) code = "noaudio";
+  else if (/음성을 찾지 못했습니다/.test(m)) code = "novoice";
+  const c = TTS_CAUSES[code];
+  return { code: code, status: st, sticky: c.sticky, short: c.short, fix: c.fix };
+}
+
+/* Records a failure. Returns true when the user should be told about it:
+   always for a passing cause, and only the first time for a sticky one. */
+function ttsFailRecord(cause){
+  if (!cause.sticky) return true;
+  const old = lset.ttsFail;
+  const seen = !!(old && old.code === cause.code && old.shown);
+  lset.ttsFail = { code: cause.code, status: cause.status, cause: cause.short,
+                   fix: cause.fix, date: todayKey(), shown: true };
+  lpersist();
+  return !seen;
+}
+function ttsFailClear(){
+  if (!lset.ttsFail) return;
+  delete lset.ttsFail;
+  lpersist();
+}
+
+/* The fallback notice: a short cause and what to do on top, the raw error
+   (Google's JSON included) folded under «자세히». */
+function ttsFailNotice(lead, err, remembered){
+  const c = ttsCause(err);
+  return {
+    text: lead + "\n원인: " + c.short + "\n" + c.fix +
+          (remembered ? "\n같은 원인이면 다음부터는 이 안내를 띄우지 않고 설정에만 표시합니다." : ""),
+    detail: String((err && err.message) || err || "")
+  };
 }
 
 /* Aborts every request in flight. fetch() has no timeout of its own, and the
@@ -3275,11 +3354,53 @@ function wireMediaSession(){
 /* The lesson screen is a full-height modal, so showError and setStatus — which
    write the page behind it — are invisible on a phone. Anything the user has
    to read while the lesson is open goes here instead. */
-function lessonNotice(text){
+function lessonNotice(note){
   const box = $("lNotice");
   if (!box) return;
-  box.textContent = text || "";
+  /* a plain string, or { text, detail } where detail is raw technical text
+     folded under «자세히». Everything goes in as textContent: error text from
+     a server is never parsed as HTML. */
+  const text = note && typeof note === "object" ? String(note.text || "") : String(note || "");
+  const detail = note && typeof note === "object" ? String(note.detail || "") : "";
+  box.textContent = "";
   box.style.display = text ? "block" : "none";
+  if (!text) return;
+
+  const x = document.createElement("button");
+  x.type = "button";
+  x.className = "L-notice-x";
+  x.setAttribute("aria-label", "닫기");
+  x.textContent = "✕";
+  x.onclick = () => { box.style.display = "none"; };
+  box.appendChild(x);
+
+  const msg = document.createElement("div");
+  msg.textContent = text;
+  box.appendChild(msg);
+
+  if (detail){
+    const d = document.createElement("details");
+    d.className = "L-notice-more";
+    const s = document.createElement("summary");
+    s.textContent = "자세히";
+    const pre = document.createElement("div");
+    pre.textContent = detail;
+    d.appendChild(s);
+    d.appendChild(pre);
+    box.appendChild(d);
+  }
+}
+
+/* NO_ES_VOICE is about the device, which does not change from one lesson to
+   the next: once a study day is enough. */
+const NO_ES_VOICE_DAY_KEY = "interp.noEsVoiceDay";
+function noEsVoiceOnce(){
+  let last = "";
+  try { last = localStorage.getItem(NO_ES_VOICE_DAY_KEY) || ""; } catch (e) {}
+  const today = todayKey();
+  if (last === today) return "";
+  try { localStorage.setItem(NO_ES_VOICE_DAY_KEY, today); } catch (e) {}
+  return NO_ES_VOICE;
 }
 
 function mountLesson(rec, notice, opts){
@@ -3341,7 +3462,10 @@ function mountLesson(rec, notice, opts){
   if (!current.blob && !notice){
     const mine = current;
     devVoicesReady().then((list) => {
-      if (current === mine && list.length && !devPickVoice("es", list)) lessonNotice(NO_ES_VOICE);
+      if (current === mine && list.length && !devPickVoice("es", list)){
+        const n = noEsVoiceOnce();
+        if (n) lessonNotice(n);
+      }
     }).catch(() => {});
   }
 }
@@ -4142,7 +4266,7 @@ async function makeLessonRun(rows){
     const prev = await lessonPrevFor(studyDate(now)).catch(() => null);
     if (lessonCancelled) throw new Error("__cancelled__");
     const lesson = lessonBuild(content, now, prev, cur);
-    let blob = null, fellBack = "";
+    let blob = null, fellBack = "", fellErr = null;
 
     if (lset.engine === "cloud" && lset.ttsKey){
       lessonMessage("음성을 만드는 중…", "0 / ?");
@@ -4157,10 +4281,21 @@ async function makeLessonRun(rows){
         /* the script is already written and paid for — finish the lesson on the
            device voice rather than throwing all of it away */
         fellBack = (e && e.message) ? String(e.message) : String(e);
+        fellErr = e;
         lesson.segments.forEach((s) => { delete s.audioMs; });
         delete lesson.padMs;
       }
       if (lessonCancelled) throw new Error("__cancelled__");
+      if (blob) ttsFailClear();
+    }
+    /* a sticky cause (bad key, API off, billing) is told once, then lives in
+       settings; the engine stays as the user set it */
+    let failNote = null;
+    if (fellBack){
+      const cause = ttsCause(fellErr || fellBack);
+      if (ttsFailRecord(cause))
+        failNote = ttsFailNotice("고품질 음성을 만들지 못해 기기 음성으로 수업을 만들었습니다.",
+                                 fellErr || fellBack, cause.sticky);
     }
     if (!blob) lessonEstimate(lesson);
 
@@ -4191,15 +4326,18 @@ async function makeLessonRun(rows){
       noEsVoice = devList.length > 0 && !devPickVoice("es", devList);
     }
 
-    const notice = [
-      fellBack ? "고품질 음성을 만들지 못해 기기 음성으로 수업을 만들었습니다.\n" + fellBack : "",
+    const noticeText = [
+      failNote ? failNote.text : "",
       /* the docs disagree about this voice family and speed; if the API refused
          the slow read, say so rather than let it look like a bug */
       blob && ttsRateRefused
         ? "이 음성은 «느리게 읽기» 를 지원하지 않아, 느린 문장도 보통 속도로 읽습니다." : "",
-      noEsVoice ? NO_ES_VOICE : "",
+      noEsVoice ? noEsVoiceOnce() : "",
       saveNote
     ].filter(Boolean).join("\n\n");
+    const notice = noticeText
+      ? (failNote ? { text: noticeText, detail: failNote.detail } : noticeText)
+      : "";
 
     mountLesson(rec, notice);
     setStatus((fellBack ? "기기 음성으로 준비됨 · " : "수업 준비됨 · ") + fmtClock(lesson.totalMs));
@@ -4258,10 +4396,13 @@ async function lessonToMp3(){
                                                     lesson: mine.lesson, mp3: null, qa: mine.qa };
       const why = lessonCancelled || (err && err.message === "__cancelled__") ? "" :
         !same && saved ? "그사이 수업이 바뀌어 음성을 저장하지 않았습니다." :
-        "고품질 음성을 만들지 못했습니다.\n" + ((err && err.message) || "");
+        err ? (ttsFailRecord(ttsCause(err)),
+               ttsFailNotice("고품질 음성을 만들지 못했습니다.", err, false)) :
+        "고품질 음성을 만들지 못했습니다.";
       mountLesson(back, why);
       return;
     }
+    ttsFailClear();
     const rec = Object.assign({}, saved, { engine: "cloud", lesson: lesson, mp3: blob });
     let note = "";
     try { await lessonSave(rec); }
@@ -5032,6 +5173,7 @@ function lessonFillSettings(){
   if (!eng) return;
   eng.value = lset.engine;
   $("lTtsKey").value = lset.ttsKey;
+  lessonFillTtsFail();
   const se = $("lSexEs"), sk = $("lSexKo");
   if (se) se.value = lset.sexEs === "male" ? "male" : "female";
   if (sk) sk.value = lset.sexKo === "male" ? "male" : "female";
@@ -5045,6 +5187,18 @@ function lessonFillSettings(){
   const vm = $("lVoiceMsg");
   if (vm) vm.textContent = lessonVoiceLine();
   lessonFillProgress();
+}
+
+/* 설정 › 오디오 수업 음성: the remembered Cloud TTS failure, under the key */
+function lessonFillTtsFail(){
+  const box = $("lTtsFail");
+  if (!box) return;
+  const f = lset.ttsFail;
+  box.hidden = !f;
+  box.textContent = f
+    ? "최근 수업에서 고품질 음성이 실패했습니다 (" + (f.date || "") + (f.status ? ", TTS " + f.status : "") + ").\n" +
+      (f.cause || "") + "\n" + (f.fix || "") + "\n고친 뒤 다음 수업이 고품질 음성으로 만들어지면 이 안내는 사라집니다."
+    : "";
 }
 
 /* 설정 › 수업 진도 */
@@ -5076,6 +5230,8 @@ function lessonSaveSettings(){
   if (lset.ttsKey !== before || sexBefore !== lset.sexEs + "|" + lset.sexKo){
     lset.voiceEs = ""; lset.voiceEsCode = ""; lset.voiceKo = ""; lset.voiceKoCode = "";
   }
+  /* a different key gets a fresh chance: the old key's failure says nothing about it */
+  if (lset.ttsKey !== before) delete lset.ttsFail;
   lpersist();
 }
 
