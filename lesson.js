@@ -20,10 +20,13 @@ const LESSON_DEFAULTS = {
   voiceEs: "", voiceEsCode: "", voiceKo: "", voiceKoCode: "",
   sexEs: "female", sexKo: "female",
   devVoiceEs: "", devVoiceKo: "",
-  chars: { ym: "", n: 0 }
+  chars: { ym: "", n: 0 },
+  /* lesson length in minutes, 10 or 20; a saved setting without it reads as 10 */
+  minutes: 10
 };
 let lset = Object.assign({}, LESSON_DEFAULTS, jget(LESSON_KEY, {}));
 function lpersist(){ jset(LESSON_KEY, lset); }
+const lessonMinutes = () => (Number(lset.minutes) === 20 ? 20 : 10);
 
 const TTS_URL = "https://texttospeech.googleapis.com/v1beta1/text:synthesize";
 const TTS_VOICES_URL = "https://texttospeech.googleapis.com/v1/voices";
@@ -96,13 +99,16 @@ function ordKo(n){
 }
 
 /* ---------------- lesson content from the AI ----------------
-   One call writes the material of a 20-minute, five-part audio lesson; the
-   app builds the timeline (parts, repetitions, silences to answer in, sound
-   cues) in code — see lessonBuild. */
+   One call writes the material of a 10- or 20-minute, five-part audio lesson
+   (lset.minutes); the app builds the timeline (parts, repetitions, silences to
+   answer in, sound cues) in code — see lessonBuild. The prompt differs only in
+   the minutes, the part clock and how much story and challenge to write. */
 
-const LESSON_PROMPT = [
+function lessonPrompt(minutes){
+  const A = lessonLength(minutes).ai;
+  return [
   "You are a Spanish instructional designer with ten years of experience building lively, immersive",
-  "audio lessons. You write the MATERIAL of one 20-minute audio lesson. The learner is a Korean who",
+  "audio lessons. You write the MATERIAL of one " + A.min + "-minute audio lesson. The learner is a Korean who",
   "runs a Korean restaurant in Mexico, a complete beginner, who listens in the car and on the phone",
   "and is expected to ANSWER OUT LOUD. The app builds the timeline in code — the five parts, the",
   "repetitions, the silences to answer in, the sound cues. You choose and write what goes in.",
@@ -117,14 +123,14 @@ const LESSON_PROMPT = [
   "                 (expressions), sentences, pronoun lines (may be empty).",
   "",
   "THE FIVE PARTS (the app times them; you fill them):",
-  "  1 warm-up, 0-3 min: a 3-second speed quiz on the last lesson (the app makes it from that",
+  "  1 warm-up, " + A.clock[0] + " min: a 3-second speed quiz on the last lesson (the app makes it from that",
   "    lesson), then today's situation thrown at the learner (situation.setup).",
-  "  2 cheat code 1, 3-8 min: today's grammar_step as ONE plain 'cheat code' (cheat.hook), then the",
+  "  2 cheat code 1, " + A.clock[1] + " min: today's grammar_step as ONE plain 'cheat code' (cheat.hook), then the",
   "    target expressions drilled three times in rhythm, each with a short example.",
-  "  3 cheat code 2, 8-14 min: a short role-play — something goes wrong and the learner talks their",
+  "  3 cheat code 2, " + A.clock[2] + " min: a short role-play — something goes wrong and the learner talks their",
   "    way out of it — built from the targets, the frames and the idiom.",
-  "  4 one-second challenge, 14-18 min: a Korean situation, the learner answers in Spanish at once.",
-  "  5 cool-down, 18-20 min: one take-away sentence and a small real-life mission.",
+  "  4 one-second challenge, " + A.clock[3] + " min: a Korean situation, the learner answers in Spanish at once.",
+  "  5 cool-down, " + A.clock[4] + " min: one take-away sentence and a small real-life mission.",
   "",
   "CHOOSE AND FOCUS. A list of twenty words read out loses a listener in the car. Pick FEW things",
   "and use each of them many times inside one storyline.",
@@ -180,13 +186,13 @@ const LESSON_PROMPT = [
   "  ko: the meaning with ~ where the rest goes. note: OPTIONAL one Korean line on when it is used.",
   "  A frame that no story line uses is thrown away by the app.",
   "",
-  "story — the role-play, 10 to 14 lines in two short scenes: something goes wrong (a complaint, a",
+  "story — the role-play, " + A.lines + " lines in two short scenes: something goes wrong (a complaint, a",
   "  mistake, a missing thing), then the learner's role talks their way out and fixes it.",
   "  title: a short Korean title. setup: one Korean line.",
   "  lines[].who: the speaker in Korean, short (손님, 사장님, 요리사, 직원). lines[].es: at most 12",
   "  words, natural Mexican Spanish; the learner's lines use the targets and the frames many times.",
   "  lines[].ko: its Korean. lines[].learner: true for the lines the learner says (their role),",
-  "  5 to 7 of them. lines[].gesture: OPTIONAL, shown on screen only.",
+  "  " + A.learner + " of them. lines[].gesture: OPTIONAL, shown on screen only.",
   "",
   "idiom — ONE set expression genuinely in daily use in Mexico that fits the story (estar en su salsa",
   "  = 물 만난 물고기, cambiar de idea = 생각을 바꾸다), ideally one heard today. Only one you are",
@@ -198,7 +204,7 @@ const LESSON_PROMPT = [
   "  appears in your story or targets (mide for medir). ko: plain Korean meaning. Do not force a",
   "  word in; unused ones simply wait for another day.",
   "",
-  "challenge — 10 to 12 one-second prompts: ko is a short Korean situation or order (창문 닫아! / 그거",
+  "challenge — " + A.challenge + " one-second prompts: ko is a short Korean situation or order (창문 닫아! / 그거",
   "  나 줘! / 그게 실은 못 해…), es the Spanish answer of at most 6 words (¡Ciérralo! / ¡Dámelo! /",
   "  Es que no puedo.). Mostly the targets and frames in new situations.",
   "",
@@ -229,7 +235,8 @@ const LESSON_PROMPT = [
   "- Never state as fact anything about the learner, the staff or the customers that the data does",
   "  not say. The story is a role-play, and is presented as one.",
   "- Skip greetings, yes/no and anything with no learning in it as targets."
-].join("\n");
+  ].join("\n");
+}
 
 /* Pull the JSON out of a reply that may carry a fence or stray prose. */
 function lessonExtractJson(text){
@@ -472,8 +479,9 @@ function lessonNormalise(raw, sourceEs, cur){
 
 /* `cur` is the day's curriculum plan: which new words to explain, which
    grammar step, and the lines where a lo/le/se was spotted. It travels in the
-   same single call as today's conversation. */
-async function lessonWriteScript(rows, cur){
+   same single call as today's conversation. `minutes` is the lesson length
+   (10 or 20): it sets how much story and challenge the AI is asked for. */
+async function lessonWriteScript(rows, cur, minutes){
   const payload = rows.map((e) => ({
     es: spanishOf(e),
     ko: koreanOf(e),
@@ -503,7 +511,7 @@ async function lessonWriteScript(rows, cur){
     const nudge = attempt === 0 ? "" :
       "\n\nYour previous reply could not be parsed. Return ONLY the JSON object, starting " +
       "with { and ending with }. No fence, no text before it and none after it.";
-    const sys = LESSON_PROMPT + nudge;
+    const sys = lessonPrompt(minutes) + nudge;
     const claudeTurn = !!settings.claudeKey && !(route.claudeFailed && settings.apiKey);
     const limitMs = SCRIPT_TIMEOUT_MS + (claudeTurn ? CLAUDE_SCRIPT_TIMEOUT_MS : 0);
     try {
@@ -1165,25 +1173,45 @@ function reviewPlan(prev, iso){
            items: take, estMs: ms };
 }
 
-/* ---------------- the 20-minute lesson: five parts, built in code ----------------
+/* ---------------- the 10- or 20-minute lesson: five parts, built in code ----------------
 
    The AI writes the material (lessonNormalise); everything about time is
    decided here: what is said in which part, how often, and the silences the
    learner answers in. Each part is built at a few levels of fullness and the
-   combination whose estimated length lands nearest 20:00 (and nearest each
-   part's own slot) is kept. A lesson made this way carries fmt LESSON_FMT;
-   lessonTimeline then writes the real start and end of each part into its
-   title. Old saved lessons have no fmt and are left exactly as they were. */
+   combination whose estimated length lands nearest the target (10:00 or
+   20:00, lset.minutes) and nearest each part's own slot is kept. The levels
+   only add repetition rounds (a second quiz round, slow reads, replays,
+   meaning-first rounds, more challenge rounds); the core — the targets ×3,
+   the story lines with call and response, one challenge round, the take-away
+   and the mission — is in every level, so a short lesson loses rounds, not
+   material. A lesson made this way carries fmt LESSON_FMT (the name is from
+   when 20 minutes was the only length) and `minutes`; lessonTimeline then
+   writes the real start and end of each part into its title. Old saved
+   lessons have no fmt and are left exactly as they were. */
 
 const LESSON_FMT = "story20";
-const LESSON_TARGET_MS = 20 * 60000;
 const PARTS = {
-  warm:      { id: "warm",      title: "① 도입 · 워밍업",            slot: 180000 },
-  cheat:     { id: "cheat",     title: "② 치트키 1",                 slot: 300000 },
-  story:     { id: "story",     title: "③ 치트키 2 · 위기 탈출 상황극", slot: 360000 },
-  challenge: { id: "challenge", title: "④ 1초 반응 챌린지",            slot: 240000 },
-  cool:      { id: "cool",      title: "⑤ 쿨다운 · 오늘의 미션",        slot: 120000 }
+  warm:      { id: "warm",      title: "① 도입 · 워밍업" },
+  cheat:     { id: "cheat",     title: "② 치트키 1" },
+  story:     { id: "story",     title: "③ 치트키 2 · 위기 탈출 상황극" },
+  challenge: { id: "challenge", title: "④ 1초 반응 챌린지" },
+  cool:      { id: "cool",      title: "⑤ 쿨다운 · 오늘의 미션" }
 };
+/* Per length: the target, each part's slot (ms), and what the AI is asked to
+   write. At 10 minutes the warm-up and cool-down keep more of their share (the
+   quiz and the take-away are short already); the story and the challenge get
+   less material instead of being cut afterwards. */
+const LESSON_LENGTHS = {
+  10: { targetMs: 10 * 60000,
+        slot: { warm: 100000, cheat: 160000, story: 160000, challenge: 100000, cool: 80000 },
+        ai: { min: 10, clock: ["0-2", "2-4", "4-7", "7-9", "9-10"],
+              lines: "6 to 8", learner: "3 or 4", challenge: "5 or 6" } },
+  20: { targetMs: 20 * 60000,
+        slot: { warm: 180000, cheat: 300000, story: 360000, challenge: 240000, cool: 120000 },
+        ai: { min: 20, clock: ["0-3", "3-8", "8-14", "14-18", "18-20"],
+              lines: "10 to 14", learner: "5 to 7", challenge: "10 to 12" } }
+};
+const lessonLength = (minutes) => LESSON_LENGTHS[Number(minutes) === 20 ? 20 : 10];
 
 /* Pauses, in seconds. The answer gaps are the point of the lesson: the
    learner speaks into them. */
@@ -1274,7 +1302,7 @@ function pQuiz(p, x, think, fields){
 function buildWarm(ctx, level){
   const p = lessonPart(PARTS.warm), c = ctx.content;
   const nT = c.targets.length;
-  const intro = ctx.dateLabel + " 스페인어 수업입니다. 오늘은 20분 동안 듣기만 하지 말고, 입으로 직접 말하는 수업이에요. " +
+  const intro = ctx.dateLabel + " 스페인어 수업입니다. 오늘은 " + ctx.minutes + "분 동안 듣기만 하지 말고, 입으로 직접 말하는 수업이에요. " +
     "조용해지는 틈이 나오면, 그 틈에 꼭 소리 내어 말해 보세요.";
   pSay(p, intro, Q.lead, { cue: "chime" });
 
@@ -1296,7 +1324,7 @@ function buildWarm(ctx, level){
   const who = ctx.plan ? (ctx.plan.yesterday ? "어제 배운 표현이에요." : "지난 " + ctx.plan.label + " 수업 표현이에요.")
                        : "지난번에 배운 단어예요.";
   pSay(q, "몸풀기로 3초 스피드 퀴즈! " + who + " 한국어를 들으면 3초 안에 스페인어로 말하세요. 그다음에 정답이 나와요.", Q.lead);
-  const room = PARTS.warm.slot - p.ms() - tail.ms() - 4000;
+  const room = ctx.len.slot.warm - p.ms() - tail.ms() - 4000;
   const took = [];
   for (const it of ctx.quiz){
     const trial = lessonPart(PARTS.warm);
@@ -1608,8 +1636,11 @@ function partsJoin(parts){
 const partsMs = (list) => list.reduce((n, p) => n + p.ms(), 0);
 
 /* `prev`, when given, is the saved lesson before this one: the warm-up quizzes
-   it. `cur` is the day's course plan (curriculumPlan). */
-function lessonBuild(content, when, prev, cur){
+   it. `cur` is the day's course plan (curriculumPlan). `minutes` is 10 or 20;
+   left out, it is the lesson setting. */
+function lessonBuild(content, when, prev, cur, minutes){
+  const min = Number(minutes == null ? lessonMinutes() : minutes) === 20 ? 20 : 10;
+  const len = lessonLength(min);
   const iso = studyDate(when);
   const dateLabel = Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) + "일";
   const recent = cur && asObj(cur.recent) ? cur.recent : null;
@@ -1622,6 +1653,7 @@ function lessonBuild(content, when, prev, cur){
   const pp = pronounPlan(content.pronoun, iso, recent);
   const ctx = {
     content: content, iso: iso, dateLabel: dateLabel, dn: dayNum(iso), plan: plan, quiz: quiz,
+    minutes: min, len: len,
     step: G ? GRAMMAR_STEPS[G.idx] : null,
     knownT: (t, es) => !!(recent && recent[taughtId(t, es)]),
     pron: pp.quiz.slice(0, PRON_QUIZ),
@@ -1629,7 +1661,7 @@ function lessonBuild(content, when, prev, cur){
   };
 
   /* the fixed parts once; the three elastic ones at every level, and the
-     combination nearest 20:00 — with a lighter pull towards each part's slot */
+     combination nearest the target — with a lighter pull towards each part's slot */
   const cools = [0, 1].map((l) => buildCool(ctx, l));
   const warms = [0, 1].map((l) => buildWarm(ctx, l));
   const cheats = [0, 1, 2, 3, 4].map((l) => buildCheat(ctx, l));
@@ -1637,12 +1669,12 @@ function lessonBuild(content, when, prev, cur){
   const chals = [1, 2, 3, 4, 5].map((n) => buildChallenge(ctx, n));
   const ms = new Map();
   for (const list of [].concat(cools, warms, cheats, stories, chals)) ms.set(list, partsMs(list));
-  const off = (list, part) => Math.abs(ms.get(list) - part.slot);
+  const off = (list, id) => Math.abs(ms.get(list) - len.slot[id]);
   let best = null;
   for (const w of warms) for (const a of cheats) for (const b of stories) for (const d of chals) for (const e of cools){
     const total = ms.get(w) + ms.get(a) + ms.get(b) + ms.get(d) + ms.get(e);
-    const cost = Math.abs(total - LESSON_TARGET_MS) +
-      0.3 * (off(w, PARTS.warm) + off(a, PARTS.cheat) + off(b, PARTS.story) + off(d, PARTS.challenge) + off(e, PARTS.cool));
+    const cost = Math.abs(total - len.targetMs) +
+      0.3 * (off(w, "warm") + off(a, "cheat") + off(b, "story") + off(d, "challenge") + off(e, "cool"));
     if (!best || cost < best.cost) best = { cost: cost, parts: [].concat(w, a, b, d, e), estMs: total };
   }
   const joined = partsJoin(best.parts);
@@ -1662,7 +1694,7 @@ function lessonBuild(content, when, prev, cur){
   const titles = {};
   for (const p of best.parts) titles[p.part.id] = p.part.title;
   return Object.assign({
-    fmt: LESSON_FMT, date: iso, dateLabel: dateLabel, parts: titles,
+    fmt: LESSON_FMT, minutes: min, date: iso, dateLabel: dateLabel, parts: titles,
     counts: Object.assign({ words: 0, idioms: taught.filter((x) => x.t === "i").length,
                             sentences: content.takeaway ? 1 : 0, frames: content.frames.length,
                             targets: content.targets.length, story: content.story.lines.length,
@@ -3916,13 +3948,15 @@ async function makeLessonRun(rows){
        first, because the one script call has to explain it */
     const now = new Date();
     const cur = curriculumPlan(rows.map((e) => spanishOf(e)), studyDate(now));
-    const content = await lessonWriteScript(rows, cur);
+    /* read once, so the script asked for and the lesson built have one length */
+    const minutes = lessonMinutes();
+    const content = await lessonWriteScript(rows, cur, minutes);
     if (lessonCancelled) throw new Error("__cancelled__");
 
     /* 0교시 is read out of the last saved lesson; a storage error only costs the review */
     const prev = await lessonPrevFor(studyDate(now)).catch(() => null);
     if (lessonCancelled) throw new Error("__cancelled__");
-    const lesson = lessonBuild(content, now, prev, cur);
+    const lesson = lessonBuild(content, now, prev, cur, minutes);
     let blob = null, fellBack = "", fellErr = null;
 
     if (lset.engine === "cloud" && lset.ttsKey){
@@ -4839,6 +4873,8 @@ function lessonFillSettings(){
   const se = $("lSexEs"), sk = $("lSexKo");
   if (se) se.value = lset.sexEs === "male" ? "male" : "female";
   if (sk) sk.value = lset.sexKo === "male" ? "male" : "female";
+  const lm = $("lMinutes");
+  if (lm) lm.value = String(lessonMinutes());
   /* the device list is what fills in the "기기 음성: …" line, and on Chrome it
      is empty until voiceschanged fires */
   devVoicesReady().then((list) => {
@@ -4887,6 +4923,7 @@ function lessonSaveSettings(){
   lset.ttsKey = $("lTtsKey").value.trim();
   if ($("lSexEs")) lset.sexEs = $("lSexEs").value === "male" ? "male" : "female";
   if ($("lSexKo")) lset.sexKo = $("lSexKo").value === "male" ? "male" : "female";
+  if ($("lMinutes")) lset.minutes = $("lMinutes").value === "20" ? 20 : 10;
   /* a new key means a new project, and a new gender means a different voice:
      either way the remembered pick has to be made again */
   if (lset.ttsKey !== before || sexBefore !== lset.sexEs + "|" + lset.sexKo){
