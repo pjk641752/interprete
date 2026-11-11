@@ -1824,10 +1824,14 @@ const CONNECTORS = ["por", "para", "a", "al", "de", "del", "en", "con", "sin", "
 /* pauses, seconds */
 const TP = { line: 0.6, model: 0.8, slow: 1.0, es: 0.9, think: 2.0, answer: 1.5, item: 1.2,
              repMin: 2.4, repMax: 5.5, repPad: 1.2, repCap: 7.0 };
-const TEACH_SCALES = [0.8, 0.9, 1, 1.15, 1.3, 1.5];
+/* only a light stretch of the pauses: a short reply makes a shorter lesson, never a padded one */
+const TEACH_SCALES = [0.9, 1, 1.15];
 
 const LATIN_CH = /[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/;
 const GIMMICK_RE = /무기|치트키|챌린지|쿨다운|미션|퀘스트|필살기|레벨업/;
+/* the Korean voice spelling Spanish sounds («아르로 끝나는 말», «'에'로 바뀌어요»): confusing
+   by ear — the rule is shown by the Spanish voice instead (hablar, habla. comer, come.) */
+const SPELL_RE = /(?:아르|에르|이르)['‘’«»"“”]?(?:로|나)|['‘’«»"“”](?:아|에|이|오|우|이에)['‘’«»"“”]/;
 /* a complete spoken Korean sentence ends like this (해요체, 합쇼체, a question) */
 const KO_END = /[요다죠까네]$/;
 /* emoji, arrows, circled numbers, dingbats, flags (surrogate pairs) — no \p{} here:
@@ -1904,17 +1908,47 @@ function speakClean(s, es){
       return n >= 1 && n <= 10 ? KO_NATIVE[n] + " " + u : all;
     });
     t = t.replace(/\d+(?:[.,]\d+)?/g, (m) => numKo(m));
-    /* a quote glued to a particle goes without a gap («열다»예요 → 열다예요),
-       and a full stop inside it with it («줄게.»예요 → 줄게예요) */
-    t = t.replace(/([.?!])[»”’"']+(?=[가-힣])/g, "").replace(/[«»“”"‘’'`]/g, "");
-    /* «~로» in an explanation: said as 뭐뭐로, never as a symbol */
-    t = t.replace(/~\s*(?=[가-힣])/g, "뭐뭐");
+    /* Quotes stay: a Korean voice reads them as a short pause, and «'열어!'가»
+       without them turns into «열어가». Every kind becomes ' (held as \u0001
+       through the stripping below). A full stop inside a quote that a particle
+       follows goes («줄게.»예요 → '줄게'예요). */
+    t = t.replace(/[«»“”"‘’'`]+/g, "\u0001")
+         /* only before a CLOSING quote (an odd number of quotes before it) */
+         .replace(/([^\s\u0001])[.?!]+(?=\u0001[가-힣])/g,
+                  (m, ch, off, str) => ((str.slice(0, off).match(/\u0001/g) || []).length % 2 ? ch : m));
+    /* a leftover ~ placeholder becomes a natural word, never a symbol */
+    t = t.replace(/~\s*([가-힣]+)/g, (all, w) => tildeKo(w));
   }
   t = t.replace(/~/g, " ").replace(/[«»“”"‘’'`()[\]{}<>*#_=+\\^@&%$|]/g, " ")
        .replace(/\s*[·•—–:;/→↔…]+\s*/g, ", ");
-  t = t.replace(es ? /[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ¡¿.,?! ]/g : /[^가-힣A-Za-zÁÉÍÓÚÜÑáéíóúüñ.,?! ]/g, " ");
-  return t.replace(/\s+/g, " ").replace(/\s+([.,?!])/g, "$1").replace(/([.,?!])[.,]+/g, "$1")
-          .replace(/^[\s.,?!]+/, "").replace(/[\s,]+$/, "").replace(/[¡¿]+$/, "").trim();
+  t = t.replace(es ? /[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ¡¿.,?! ]/g : /[^가-힣A-Za-zÁÉÍÓÚÜÑáéíóúüñ.,?! \u0001]/g, " ");
+  t = t.replace(/\s+/g, " ").replace(/\s+([.,?!])/g, "$1").replace(/([.,?!])[.,]+/g, "$1")
+       .replace(/^[\s.,?!]+/, "").replace(/[\s,]+$/, "").replace(/[¡¿]+$/, "").trim();
+  return es ? t : koQuotes(t);
+}
+/* the quotes of a spoken Korean line: no stray or unpaired ones, the full
+   stop outside the closing one («줘.'» → «줘'.») */
+function koQuotes(t){
+  let s = t.replace(/\u0001+/g, "\u0001").replace(/(^|\s)\u0001(?=\s|$)/g, "$1");
+  if ((s.match(/\u0001/g) || []).length % 2) s = s.replace(/\u0001/g, "");
+  /* pair by pair: an empty pair goes, a full stop before a closing quote moves outside it */
+  s = s.replace(/\u0001([^\u0001]*)\u0001/g, (m, x) => {
+    if (!x.trim()) return "";
+    const end = x.match(/[.?!]+$/);
+    return end ? "\u0001" + x.slice(0, -end[0].length) + "\u0001" + end[0] : m;
+  });
+  return s.replace(/\u0001/g, "'").replace(/([.,?!])[.,]+/g, "$1").replace(/\s+/g, " ")
+          .replace(/^[\s.,?!]+/, "").trim();
+}
+/* «~로 맞바꿔서» → «무엇으로 맞바꿔서», «~할 거야» → «무엇을 할 거야» */
+function tildeKo(w){
+  /* `w` is the whole Hangul run glued to the ~: a particle only when it is all of it */
+  if (/^(에게|한테|께|에게서|한테서)$/.test(w)) return "누구" + w;
+  if (/^(할|하는|한|했던|해야|하려고)$/.test(w)) return "무엇을 " + w;
+  if (/^(으로|로|으로서|로서|를|을|가|이|는|은|와|과|랑|이랑|하고|의|에|에서|까지|부터|처럼|만|도|보다|때문에)$/.test(w))
+    return "무엇" + w.replace(/^로/, "으로").replace(/^를/, "을").replace(/^가$/, "이").replace(/^는/, "은")
+      .replace(/^와/, "과").replace(/^랑/, "이랑").replace(/^때문에/, " 때문에");
+  return "무엇 " + w;
 }
 
 /* stretches of Latin letters with no Hangul between them */
@@ -1937,7 +1971,11 @@ function esTurn(text, pause, diag){
   const say = speakClean(t, true);
   return say && LATIN_CH.test(say) ? [{ who: "es", shown: t, say: say, pause: pause || "" }] : [];
 }
-const trimShown = (s) => String(s || "").replace(/^[\s»”’"',.:;·—–-]+/, "").replace(/[\s«“‘"':,·—–-]+$/, "").trim();
+/* the leftovers of a split at its edges; a closing quote stays when it closes a pair */
+const trimShown = (s) => {
+  const t = String(s || "").replace(/^[\s»”’,.:;·—–-]+/, "").replace(/[\s«“‘:,·—–-]+$/, "").trim();
+  return (t.match(/['"]/g) || []).length % 2 ? t.replace(/^['"]+|['"]+$/g, "").trim() : t;
+};
 function koOnly(shown, pause){
   let say = speakClean(shown, false);
   if (!hasKo(say) || LATIN_CH.test(say)) return null;
@@ -1952,7 +1990,7 @@ function koTurn(text, pause, diag){
   const t0 = cleanStr(text);
   if (!t0) return [];
   const refuse = () => { if (diag) diag.rejected++; return null; };
-  if (GIMMICK_RE.test(t0) || BAN_RE.test(t0.replace(/\([^()]*\)/g, ""))) return refuse();
+  if (GIMMICK_RE.test(t0) || SPELL_RE.test(t0) || BAN_RE.test(t0.replace(/\([^()]*\)/g, ""))) return refuse();
   const t = t0.replace(/\(([^()]*)\)/g, (all, inner) => (BAN_RE.test(inner) ? "" : all)).trim();
   if (!hasKo(t)){ if (diag) diag.split++; return esTurn(t, pause, diag); }
   const spans = latinSpans(t);
@@ -2129,10 +2167,16 @@ function teachPrompt(){
   "  Korean sentence.",
   "  Wrong: {\"who\":\"ko\",\"text\":\"da 끝에 나에게 me, 그거 lo 를 붙여요.\"}",
   "  Right: {\"who\":\"ko\",\"text\":\"먼저 «줘»예요.\"}, {\"who\":\"es\",\"text\":\"Da.\"}, {\"who\":\"ko\",\"text\":\"다음은 «나한테»예요.\"}, {\"who\":\"es\",\"text\":\"Me.\"}",
-  "- To talk about an ending, say it in Hangul (아르로 끝나는 말, 에르나 이르로 끝나는 말) or let the es",
-  "  voice say a whole example word.",
+  "- Never spell Spanish sounds or endings in Hangul (no «아르로 끝나는 말», no «'에'로 바뀌어요»). Show a",
+  "  sound by letting the es voice say whole words, then sum it up in Korean without letters:",
+  "  {\"who\":\"ko\",\"text\":\"끝소리가 어떻게 바뀌는지 들어 보세요.\"}, {\"who\":\"es\",\"text\":\"Hablar, habla. Comer, come. Abrir, abre.\"},",
+  "  {\"who\":\"ko\",\"text\":\"원래 모양의 끝을 떼고 짧은 끝소리 하나만 남기면, 친구한테 시키는 말이 돼요.\"}",
   "- An \"es\" turn holds Spanish only, never Hangul.",
   "- No digits, symbols, list numbers, emoji or section names in any turn. Numbers are written as words.",
+  "- When the teacher names a word or a meaning, put it in single quotes ('열다', '냉장고 좀 열어 줘');",
+  "  the voice reads the quotes as a short pause.",
+  "- Never write ~ or a placeholder in a ko turn. Write a natural phrase instead: 무엇으로 맞바꿔서,",
+  "  '할 거야'라는 말, 누구를 위해.",
   "",
   "HOW THE TEACHER TALKS",
   "- Like a warm, experienced Korean tutor talking to one adult: natural spoken 해요체, complete sentences,",
@@ -2147,19 +2191,21 @@ function teachPrompt(){
   "SAY WHY, BRIEFLY — when a word changes shape, give the reason in one or two short lines, not only that",
   "it changed:",
   "- Telling a friend to do something (abrir → abre): «친구한테 시키는 모양은 '그 사람이 ~한다'는 모양과",
-  "  똑같아요. 그래서 '그가 연다'가 그대로 '열어!'가 돼요.» Then the rule once: «아르로 끝나는 말은 '아'로,",
-  "  에르나 이르로 끝나는 말은 '에'로 끝나요.»",
+  "  똑같아요. 그래서 '그가 연다'가 그대로 '열어!'가 돼요.» Then the rule once, by sound (see above):",
+  "  hablar, habla. comer, come. abrir, abre.",
   "- The short irregular ones (pon, ten, ven, di, haz, sal, sé, ve): «자주 쓰는 짧은 말 몇 개는 따로 외우는",
   "  모양이에요.»",
   "- Who does it (como, comes, come): the ending already tells who, so Spanish often leaves out 나 or 너.",
-  "- Matching (frío, fría, fríos): a describing word follows the thing it describes, in a or o, one or many.",
+  "- Matching (frío, fría, fríos): a describing word follows the thing it describes; let the es voice",
+  "  say both (El caldo está frío. La sopa está fría.) rather than naming the letters.",
   "- Little attached words (lo, la, le, me, se): they mean 그거, 나한테 and so on; on an order they stick to the",
   "  end, otherwise they come in front.",
   "- ser and estar: ser for what something is, estar for how or where it is right now.",
   "- Small connecting words (por, para, a, de, en, con, que, porque, pero, y, o, si, cuando …): say what kind",
   "  of word it is in plain Korean («앞에 붙어서 뒤의 말과 한 덩어리가 되는 말이에요. 한국어 조사가 앞으로 온",
   "  거라고 보면 돼요.» or «문장과 문장을 잇는 말이에요.»), what it does in THIS sentence, and one tiny contrast",
-  "  where useful, above all por and para (por: ~로 맞바꿔서, ~때문에, ~를 거쳐 / para: ~를 위해, ~까지, ~쪽으로).",
+  "  where useful, above all por and para (por: 무엇으로 맞바꿔서, 무엇 때문에, 어디를 거쳐 / para: 누구를",
+  "  위해, 언제까지, 어느 쪽으로).",
   "  The Spanish word itself is always its own es turn.",
   "- At most TWO explained points per sentence (why has at most two entries). Pick the most useful ones;",
   "  small words count.",
@@ -2168,9 +2214,11 @@ function teachPrompt(){
   "{",
   " \"opening\": \"\",",
   " \"words\": [{\"es\":\"\",\"ko\":\"\",\"source\":\"log|list\",\"heard\":\"\",\"intro\":[],\"repeat_cue\":\"\",",
-  "            \"use\":{\"lead\":[],\"es\":\"\",\"ko\":\"\"},\"why\":[{\"about\":\"\",\"turns\":[]}],\"whole_cue\":\"\"}],",
+  "            \"use\":{\"lead\":[],\"es\":\"\",\"ko\":\"\"},\"why\":[{\"about\":\"\",\"turns\":[]}],\"whole_cue\":\"\",",
+  "            \"use2\":{\"lead\":[],\"es\":\"\",\"ko\":\"\",\"why\":[{\"about\":\"\",\"turns\":[]}]}}],",
   " \"idioms\": [{\"es\":\"\",\"ko\":\"\",\"source\":\"log|common\",\"heard\":\"\",\"literal\":[],\"meaning\":[],\"repeat_cue\":\"\",",
-  "             \"use\":{\"lead\":[],\"es\":\"\",\"ko\":\"\"},\"why\":[{\"about\":\"\",\"turns\":[]}],\"whole_cue\":\"\"}],",
+  "             \"use\":{\"lead\":[],\"es\":\"\",\"ko\":\"\"},\"why\":[{\"about\":\"\",\"turns\":[]}],\"whole_cue\":\"\",",
+  "             \"use2\":{\"lead\":[],\"es\":\"\",\"ko\":\"\",\"why\":[]}}],",
   " \"sentences\": [{\"es\":\"\",\"ko\":\"\",\"intro\":[],\"why\":[{\"about\":\"\",\"turns\":[]}],",
   "                \"variation\":{\"word\":\"\",\"lead\":[],\"es\":\"\",\"ko\":\"\"},\"repeat_cue\":\"\"}],",
   " \"takeaway\": {\"es\":\"\",\"ko\":\"\",\"lead\":[]},",
@@ -2187,8 +2235,12 @@ function teachPrompt(){
   "  use.es has the word in a changed shape, the first point explains why. A small connecting word in",
   "  use.es gets a point too, within the limit of two.",
   "- words[].whole_cue: the cue before the learner says the whole sentence; the app then plays it again.",
+  "- words[].use2: a second usage sentence that changes ONE thing in the first (who, the thing, a small",
+  "  word, already done …). lead says in Korean what changes and the new meaning; why has ONE point with",
+  "  the reason for that change. The app plays it and leaves a pause to repeat.",
   "- idioms[]: literal is the words one by one in Korean; meaning is what it really means and when to say",
-  "  it. Then use, why and whole_cue as for words.",
+  "  it. Then use, why and whole_cue as for words; use2 is a second example in another situation (why",
+  "  may be empty).",
   "- sentences[].intro: say it is something the learner said (오늘 하신 말, or 며칠 전에 하신 말 for an older",
   "  day) and give the Korean meaning; the app plays it normal and slow. why as above. variation changes",
   "  ONE word to another of today's words (variation.word is that word's es): lead in Korean («'바꾸다'",
@@ -2197,9 +2249,10 @@ function teachPrompt(){
   "- goodbye: one short, warm Korean goodbye.",
   "",
   "LENGTH — the lesson is listened to for its full length, so the teacher really talks:",
-  "- each word: about one minute. intro in two turns (the meaning, then when they would say it at work);",
-  "  why with two points of three to five turns each.",
-  "- each idiom: about a minute and a half. literal two turns, meaning two turns, why two points.",
+  "- each word: about a minute and a quarter. intro in two turns (the meaning, then when they would say",
+  "  it at work); why with two points of three to five turns each; use2 with its one reason.",
+  "- each idiom: about a minute and a half. literal two turns, meaning two turns, why two points, use2.",
+  "- Real content fills the time; the app adds no drilling to make up a short reply.",
   "- each sentence: about a minute and a half. intro two turns (that they said it, and the meaning); why",
   "  two points of three to five turns; variation lead two turns (what is swapped, and the new meaning).",
   "- Korean turns of one or two sentences each (about 20 to 80 characters). Spanish turns short.",
@@ -2209,12 +2262,15 @@ function teachPrompt(){
   "",
   "EXAMPLE of one word (follow its voice rule, its turns and its tone):",
   "{\"es\":\"abrir\",\"ko\":\"열다\",\"source\":\"log\",\"heard\":\"Ábrelo, por favor.\",",
-  " \"intro\":[{\"who\":\"ko\",\"text\":\"먼저 «열다»예요.\"}], \"repeat_cue\":\"따라 해 보세요.\",",
-  " \"use\":{\"lead\":[{\"who\":\"ko\",\"text\":\"문장으로 해 볼게요. «냉장고 좀 열어 줘.»\"}],\"es\":\"Abre el refri, por favor.\",\"ko\":\"냉장고 좀 열어 줘.\"},",
+  " \"intro\":[{\"who\":\"ko\",\"text\":\"먼저 '열다'예요.\"}], \"repeat_cue\":\"따라 해 보세요.\",",
+  " \"use\":{\"lead\":[{\"who\":\"ko\",\"text\":\"문장으로 해 볼게요. '냉장고 좀 열어 줘.'\"}],\"es\":\"Abre el refri, por favor.\",\"ko\":\"냉장고 좀 열어 줘.\"},",
   " \"why\":[{\"about\":\"abre\",\"turns\":[{\"who\":\"ko\",\"text\":\"원래 모양은 이거였죠.\"},{\"who\":\"es\",\"text\":\"Abrir.\"},",
   "   {\"who\":\"ko\",\"text\":\"친구한테 시키는 모양은 '그 사람이 연다'는 모양과 똑같아요. 그래서 '그가 연다'가 그대로 '열어!'가 돼요.\"},",
-  "   {\"who\":\"es\",\"text\":\"Abre.\"}]}],",
-  " \"whole_cue\":\"이제 문장 전체를 따라 해 보세요.\"}"
+  "   {\"who\":\"es\",\"text\":\"Abre.\"},{\"who\":\"ko\",\"text\":\"끝소리가 어떻게 바뀌는지 들어 보세요.\"},",
+  "   {\"who\":\"es\",\"text\":\"Hablar, habla. Comer, come. Abrir, abre.\"}]}],",
+  " \"whole_cue\":\"이제 문장 전체를 따라 해 보세요.\",",
+  " \"use2\":{\"lead\":[{\"who\":\"ko\",\"text\":\"이번엔 '냉장고' 대신 '그거'로 바꿔 볼게요. '그거 열어 줘.'\"}],\"es\":\"Ábrelo, por favor.\",\"ko\":\"그거 열어 줘.\",",
+  "   \"why\":[{\"about\":\"ábrelo\",\"turns\":[{\"who\":\"ko\",\"text\":\"'그거'는 시키는 말 끝에 바로 붙어요.\"},{\"who\":\"es\",\"text\":\"Ábrelo.\"}]}]}}"
   ].join("\n");
 }
 
@@ -2238,18 +2294,31 @@ const esOk = (es) => !!es && !hasKo(es) && LATIN_CH.test(es);
 function teachNormalise(raw, plan){
   if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("대본 형식이 올바르지 않습니다.");
   const diag = { rejected: 0, split: 0, dropped: 0, whyDropped: 0, varDropped: 0, recent: 0, notInLog: 0,
-                 pointsCut: 0, connectorsLeft: [] };
+                 pointsCut: 0, use2Dropped: 0, connectorsLeft: [] };
   const recent = (t, es) => !!plan.recent[taughtId(t, es)];
   const listSet = new Set(plan.wordList.map(foldEs));
   const listRecent = new Set((plan.listRecent || []).map(foldEs));
   const S = plan.size;
   const koOk = (s) => hasKo(s) && !LATIN_CH.test(s);
-  const withUse = (o, es) => {
+  const withUse = (o, es, needReason) => {
     let use = teachUse(o.use, diag);
     const why = use ? teachPoints(o.why, diag) : [];
     if (use && !phraseIn(es, use.es) && !why.length){ use = null; diag.whyDropped++; }
     if (use){ const left = connectorsLeft(use.es, why); if (left.length && why.length < TEACH_POINTS) diag.connectorsLeft.push(use.es + ": " + left.join(",")); }
-    return { use: use, why: use ? why : [], wholeCue: cueTurn(o.whole_cue, diag) };
+    /* the second sentence: for a word it changes one thing and must say why
+       (one point); for an idiom it is a second example, its reason optional */
+    const u2o = asObj(o.use2);
+    let use2 = use && u2o ? teachUse(u2o, diag) : null;
+    const why2 = use2 ? teachPoints(u2o.why, diag).slice(0, 1) : [];
+    if (use2 && (reviewKey(use2.es) === reviewKey(use.es) || (needReason && !why2.length) ||
+                 (!phraseIn(es, use2.es) && !why2.length && !idiomLike(es, use2.es)))){ use2 = null; diag.use2Dropped++; }
+    return { use: use, why: use ? why : [], wholeCue: cueTurn(o.whole_cue, diag), use2: use2, why2: use2 ? why2 : [] };
+  };
+  /* an idiom said in another person or tense: its content words after the verb are all there */
+  const idiomLike = (es, line) => {
+    const toks = foldEs(es).split(/[^a-zñ]+/).filter(Boolean).slice(1).filter((t) => t.length >= 4);
+    const have = new Set(foldEs(line).split(/[^a-zñ]+/));
+    return toks.length > 0 && toks.every((t) => have.has(t));
   };
 
   const words = [], wseen = new Set();
@@ -2264,7 +2333,7 @@ function teachNormalise(raw, plan){
     if (fromList ? !listSet.has(foldEs(es)) : !line){ diag.notInLog++; continue; }
     wseen.add(foldEs(es));
     words.push(Object.assign({ es: es, ko: ko, source: fromList ? "list" : "log", day: line ? line.day : "",
-      intro: teachTurns(o.intro, diag), repeatCue: cueTurn(o.repeat_cue, diag) }, withUse(o, es)));
+      intro: teachTurns(o.intro, diag), repeatCue: cueTurn(o.repeat_cue, diag) }, withUse(o, es, true)));
   }
   const logW = words.filter((w) => w.source === "log");
   const pickedWords = logW.slice(0, S.words).concat(words.filter((w) => w.source === "list").slice(0, Math.max(0, S.words - logW.length)));
@@ -2280,7 +2349,7 @@ function teachNormalise(raw, plan){
     iseen.add(foldEs(es));
     idioms.push(Object.assign({ es: es, ko: ko, source: line ? "log" : "common", day: line ? line.day : "",
       literal: teachTurns(o.literal, diag), meaning: teachTurns(o.meaning, diag),
-      repeatCue: cueTurn(o.repeat_cue, diag) }, withUse(o, es)));
+      repeatCue: cueTurn(o.repeat_cue, diag) }, withUse(o, es, false)));
     if (idioms.length >= S.idioms) break;
   }
 
@@ -2316,7 +2385,8 @@ function teachNormalise(raw, plan){
 
   /* the take-away is one of today's sentences, or a usage sentence */
   const candidates = sents.map((s) => ({ es: s.es, ko: s.ko }))
-    .concat(pickedWords.concat(idioms).filter((w) => w.use).map((w) => ({ es: w.use.es, ko: w.use.ko })));
+    .concat(pickedWords.concat(idioms).filter((w) => w.use).map((w) => ({ es: w.use.es, ko: w.use.ko })))
+    .concat(pickedWords.concat(idioms).filter((w) => w.use2).map((w) => ({ es: w.use2.es, ko: w.use2.ko })));
   const tk = asObj(raw.takeaway);
   const hit = tk ? candidates.find((c) => reviewKey(c.es) === reviewKey(tk.es)) : null;
   const takeBase = hit || candidates[0] || null;
@@ -2339,27 +2409,26 @@ const hasBatchim = (s) => {
   return ch >= 0xAC00 && ch <= 0xD7A3 && (ch - 0xAC00) % 28 !== 0;
 };
 const ida = (s) => (hasBatchim(s) ? "이에요" : "예요");
-const koPlain = (s) => speakClean(sayKo(s), false).replace(/[.?!]+$/, "");
+/* a Korean meaning to be quoted inside a code line: said cleanly, its own quotes and end mark gone */
+const koPlain = (s) => speakClean(s, false).replace(/'/g, "").replace(/[.?!]+$/, "").trim();
 const TEACH_POOL = {
   open: [(d) => d + " 수업이에요.", (d) => "안녕하세요. " + d + " 수업 시작할게요.", (d) => d + " 수업, 같이 시작해 봐요."],
   theme: ["오늘은 실제로 쓰신 말로 공부해 볼게요.", "오늘도 직접 하신 말들 중에서 골라 왔어요.", "오늘은 대화에서 나온 말로 같이 연습해 봐요."],
   recapLead: ["먼저 지난번에 배운 거 몇 가지만 떠올려 볼게요. 제가 한국어로 물으면, 정답이 나오기 전에 먼저 말해 보세요.",
               "시작하기 전에 지난번 거 잠깐 떠올려 봐요. 제가 물어보면 먼저 스페인어로 말해 보세요."],
-  recapAsk: [(k) => k + ". 스페인어로 뭐였죠?", (k) => "기억나시죠? " + k + ". 어떻게 말했죠?", (k) => k + ". 이건 뭐라고 했죠?"],
+  recapAsk: [(k) => "'" + k + "', 스페인어로 뭐였죠?", (k) => "기억나시죠? '" + k + "', 어떻게 말했죠?", (k) => "'" + k + "', 이건 뭐라고 했죠?"],
   recapEnd: ["좋아요. 이제 오늘 거 볼게요.", "잘하셨어요. 그럼 오늘 공부 시작해요."],
-  wordIntro: [(k) => "먼저 " + k + ida(k) + ".", (k) => "다음은 " + k + ida(k) + ".", (k) => "이번엔 " + k + ida(k) + "."],
-  useLead: [(k) => "문장으로 해 볼게요. " + k + ".", (k) => "이렇게 써요. " + k + "."],
-  idiomIntro: [(k) => "이번엔 숙어 하나 볼게요. 뜻은 " + k + ida(k) + "."],
-  sentIntro: [(k) => "이번엔 실제로 하신 말이에요. " + k + ".", (k) => "다음도 하신 말이에요. " + k + "."],
+  wordIntro: [(k) => "먼저 '" + k + "'" + ida(k) + ".", (k) => "다음은 '" + k + "'" + ida(k) + ".", (k) => "이번엔 '" + k + "'" + ida(k) + "."],
+  useLead: [(k) => "문장으로 해 볼게요. '" + k + "'.", (k) => "이렇게 써요. '" + k + "'."],
+  use2Lead: ["이번엔 한 군데만 바꿔 볼게요."],
+  idiomIntro: [(k) => "이번엔 숙어 하나 볼게요. 뜻은 '" + k + "'" + ida(k) + "."],
+  exLead: [(k) => "다른 예도 들어 볼게요. '" + k + "'."],
+  sentIntro: [(k) => "이번엔 실제로 하신 말이에요. '" + k + "'.", (k) => "다음도 하신 말이에요. '" + k + "'."],
   varLead: ["한 군데만 바꿔 볼게요."],
   repeat: ["따라 해 보세요.", "소리 내서 한번 해 보세요.", "입으로 한번 따라 해 볼까요?", "이번엔 직접 말해 보세요."],
   whole: ["이제 문장 전체를 따라 해 보세요.", "처음부터 끝까지 이어서 말해 보세요.", "문장 통째로 한번 해 볼게요."],
   again: ["한 번 더 들어 볼게요.", "다시 한번 들어 보세요.", "한 번만 더 갈게요."],
   safe: ["이 부분은 소리로 잘 들어 보세요.", "잘 들어 보세요.", "이 소리를 귀에 담아 두세요."],
-  recallWords: ["끝내기 전에 오늘 배운 말을 한 번씩 떠올려 볼게요. 제가 뜻을 말하면 먼저 스페인어로 말해 보세요.",
-                "마무리하기 전에 오늘 단어들 한 번씩 꺼내 볼까요? 정답 나오기 전에 먼저 말해 보세요."],
-  recallSents: ["이번엔 오늘 문장이에요. 조금 기니까 천천히 떠올려 보세요.", "문장도 한 번씩 떠올려 볼게요. 뜻을 듣고 먼저 말해 보세요."],
-  recallAgain: ["한 바퀴만 더 돌아볼게요. 이번엔 거꾸로, 뒤에서부터 물어볼게요."],
   take: ["오늘 하나만 가져가신다면 이 문장이에요.", "오늘 꼭 기억할 문장 하나만 다시 들어 볼게요."],
   bye: ["오늘도 수고 많으셨어요. 내일 또 만나요.", "오늘 수업은 여기까지예요. 운전 조심하세요."]
 };
@@ -2403,12 +2472,15 @@ function teachParts(c, ctx, level, scale){
   const st = { lastKo: "", lastCue: "" };
   const gap = (es) => {
     const sec = estimateMs({ speaker: "es", text: String(es || ""), rate: 1 }) / 1000 + TP.repPad;
-    return Math.round(Math.min(TP.repCap, Math.min(TP.repMax, Math.max(TP.repMin, sec)) * scale) * 10) / 10;
+    /* never shorter than TP.repMin, whatever the scale: the learner needs that long to say it */
+    return Math.round(Math.max(TP.repMin, Math.min(TP.repCap, Math.min(TP.repMax, Math.max(TP.repMin, sec)) * scale)) * 10) / 10;
   };
   const part = (id, title) => lessonPart({ id: id, title: title || TEACH_TITLES[id] });
   /* a Korean line written by code: shown with digits, said in words */
   const sayLine = (p, shown, pause, fields) => {
     let say = speakClean(shown, false);
+    /* a pool line wrapped around an empty meaning («먼저 ''예요») says nothing useful */
+    if (/''/.test(shown)){ shown = pick(TEACH_POOL.safe); say = speakClean(shown, false); }
     /* a meaning interpolated from the log may hold a Latin word: never to the Korean voice */
     if (LATIN_CH.test(say)){ shown = pick(TEACH_POOL.safe); say = speakClean(shown, false); }
     if (!say) return;
@@ -2449,21 +2521,32 @@ function teachParts(c, ctx, level, scale){
     lastEs = say;
   };
   const badgeOf = (x) => (x.source === "list" ? "단어 목록에서" : x.day && x.day !== ctx.iso ? isoLabel(x.day) + " 대화" : undefined);
-  /* a usage sentence: lead, the sentence, why, then the learner says it whole */
+  /* a usage sentence: lead, the sentence normal and slow, why, then the learner says it whole */
   const useBlock = (p, x) => {
     const u = x.use;
     if (realKo(u.lead)) turns(p, u.lead);
     else sayLine(p, pick(TEACH_POOL.useLead, koPlain(u.ko)));
-    model(p, u.es, u.say, u.ko, {}, level >= 1);
-    if (level >= 3) cue(p, null, TEACH_POOL.repeat, u.say);
+    model(p, u.es, u.say, u.ko, {}, true);
     for (const pt of x.why) turns(p, pt.turns);
     cue(p, x.wholeCue, TEACH_POOL.whole, u.say);
     model(p, u.es, u.say, u.ko, { badge: "다시" }, false);
-    if (level >= 2){
-      sayLine(p, pick(TEACH_POOL.again));
-      model(p, u.es, u.say, u.ko, {}, false);
-      cue(p, null, TEACH_POOL.repeat, u.say);
-    }
+  };
+  /* the second sentence: one thing changed, with its reason (a word), or a second example (an idiom) */
+  const use2Block = (p, x, leadPool) => {
+    const u = x.use2;
+    if (!u) return;
+    if (realKo(u.lead)) turns(p, u.lead);
+    else sayLine(p, pick(leadPool, koPlain(u.ko)));
+    model(p, u.es, u.say, u.ko, { badge: "하나 더" }, false);
+    for (const pt of x.why2) turns(p, pt.turns);
+    cue(p, null, TEACH_POOL.repeat, u.say);
+  };
+  /* the one code-added round an item may get (level 1): its main sentence once more */
+  const againBlock = (p, es, say, ko) => {
+    if (level < 1 || !say) return;
+    sayLine(p, pick(TEACH_POOL.again));
+    model(p, es, say, ko, {}, false);
+    cue(p, null, TEACH_POOL.repeat, say);
   };
 
   const parts = [];
@@ -2496,13 +2579,7 @@ function teachParts(c, ctx, level, scale){
       else sayLine(wp, pick(TEACH_POOL.wordIntro, koPlain(w.ko)));
       model(wp, w.es, speakClean(w.es, true), w.ko, { badge: badgeOf(w), rv: "expr" }, true);
       cue(wp, w.repeatCue, TEACH_POOL.repeat, speakClean(w.es, true));
-      /* level 2: the word once more, and once more to say */
-      if (level >= 2){
-        sayLine(wp, pick(TEACH_POOL.again));
-        model(wp, w.es, speakClean(w.es, true), w.ko, {}, false);
-        cue(wp, null, TEACH_POOL.repeat, speakClean(w.es, true));
-      }
-      if (w.use) useBlock(wp, w);
+      if (w.use){ useBlock(wp, w); use2Block(wp, w, TEACH_POOL.use2Lead); againBlock(wp, w.use.es, w.use.say, w.use.ko); }
       wp.teach("v", w.es);
       if (w.source === "list") wp.newUsed.push({ es: w.es, ko: w.ko });
     });
@@ -2518,7 +2595,7 @@ function teachParts(c, ctx, level, scale){
       else sayLine(ip, pick(TEACH_POOL.idiomIntro, koPlain(x.ko)));
       model(ip, x.es, speakClean(x.es, true), x.ko, { badge: badgeOf(x), rv: "idiom" }, true);
       cue(ip, x.repeatCue, TEACH_POOL.repeat, speakClean(x.es, true));
-      if (x.use) useBlock(ip, x);
+      if (x.use){ useBlock(ip, x); use2Block(ip, x, TEACH_POOL.exLead); againBlock(ip, x.use.es, x.use.say, x.use.ko); }
       ip.teach("i", x.es);
     });
     parts.push(ip);
@@ -2532,7 +2609,6 @@ function teachParts(c, ctx, level, scale){
       if (realKo(s.intro)) turns(sp, s.intro);
       else sayLine(sp, pick(TEACH_POOL.sentIntro, koPlain(s.ko)));
       model(sp, s.es, s.say, s.ko, { badge: badgeOf(s), rv: "sent" }, true);
-      if (level >= 1) cue(sp, null, TEACH_POOL.repeat, s.say);
       for (const pt of s.why) turns(sp, pt.turns);
       const v = s.variation && words.has(foldEs(s.variation.word)) ? s.variation : null;
       if (v){
@@ -2544,34 +2620,14 @@ function teachParts(c, ctx, level, scale){
         cue(sp, s.repeatCue, TEACH_POOL.whole, s.say);
         model(sp, s.es, s.say, s.ko, { badge: "다시" }, false);
       }
-      if (level >= 2){
-        sayLine(sp, pick(TEACH_POOL.again));
-        model(sp, s.es, s.say, s.ko, {}, false);
-        cue(sp, null, TEACH_POOL.whole, s.say);
-      }
+      if (v) againBlock(sp, s.es, s.say, s.ko);
       sp.teach("s", s.es);
     });
     parts.push(sp);
   }
 
-  /* 6. closing: by level, today's items recalled (the meaning, a gap, a tick,
-     the answer), then the one sentence to take away and goodbye */
+  /* 6. closing: the one sentence to take away, said by the native speaker, then goodbye */
   const cp = part("close");
-  const recall = (list, think, lead) => {
-    if (!list.length) return;
-    sayLine(cp, pick(lead));
-    for (const x of list){
-      const koSay = koPlain(x.ko), esSay = x.say || speakClean(x.es, true);
-      if (!koSay || LATIN_CH.test(koSay) || !esSay) continue;
-      const g = cp.row("pair", { es: x.es, ko: x.ko, quiz: true, who: "es", badge: "떠올리기" });
-      cp.seg(g, "ko", speakClean(pick(TEACH_POOL.recapAsk, koSay), false).replace(/([^.?!])$/, "$1?"), think, { by: "code" });
-      cp.seg(g, "es", esSay, gap(esSay), { cue: "tick" });
-    }
-  };
-  if (level >= 4) recall(c.words.concat(c.idioms), TP.think, TEACH_POOL.recallWords);
-  if (level >= 5) recall(c.sents, TP.think + 1, TEACH_POOL.recallSents);
-  /* level 6: the whole of it once more, backwards — spaced a few minutes from the first round */
-  if (level >= 6) recall(c.sents.concat(c.idioms, c.words).reverse(), TP.think, TEACH_POOL.recallAgain);
   const tk = c.takeaway;
   if (tk){
     if (realKo(tk.lead)) turns(cp, tk.lead);
@@ -2606,7 +2662,7 @@ function teachBuild(content, when, prev, plan, minutes){
   for (let drop = 0; drop <= 4; drop++){
     if (best && best.inRange) break;
     const cc = drop ? teachTrim(content, drop) : content;
-    for (const level of [0, 1, 2, 3, 4, 5, 6]){
+    for (const level of [0, 1]){
       for (const scale of TEACH_SCALES){
         const parts = teachParts(cc, ctx, level, scale);
         const ms = partsMs(parts) + (parts.length - 1) * Q.section * 1000;
