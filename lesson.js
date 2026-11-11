@@ -477,28 +477,14 @@ function lessonNormalise(raw, sourceEs, cur){
   };
 }
 
-/* `cur` is the day's curriculum plan: which new words to explain, which
-   grammar step, and the lines where a lo/le/se was spotted. It travels in the
-   same single call as today's conversation. `minutes` is the lesson length
-   (10 or 20): it sets how much story and challenge the AI is asked for. */
-async function lessonWriteScript(rows, cur, minutes){
-  const payload = rows.map((e) => ({
-    es: spanishOf(e),
-    ko: koreanOf(e),
-    tip: e.tip || undefined,
-    chunks: (e.study || []).map((s) => s.es + " = " + s.ko)
-  }));
-  const step = cur && cur.grammar ? GRAMMAR_STEPS[cur.grammar.idx] : null;
-  const body = JSON.stringify({
-    today: payload,
-    new_words: cur ? cur.newWords : [],
-    grammar_step: step ? { title: step.title, core: step.core, how: step.how } : null,
-    pronoun_hits: cur ? cur.pronounHits : [],
-    recent: cur && cur.recentList ? cur.recentList : undefined
-  });
-  /* the reply is a few thousand tokens (targets, a short role-play, the
-     challenge lines): the cap is set far above it, so a cut-off reply means
-     something went wrong rather than that the lesson simply grew */
+/* One script call: `prompt` is the system text, `body` the JSON input and
+   `normalise` turns the parsed reply into checked content (it throws when the
+   reply is unusable). The teacher lesson (teachPrompt / teachBody /
+   teachNormalise) is the only caller now. */
+async function lessonWriteScript(prompt, body, normalise){
+  /* the reply is several thousand tokens (a dialogue for each item): the cap
+     is set far above it, so a cut-off reply means something went wrong
+     rather than that the lesson simply grew */
   const cfg = { temperature: 0.4, thinking_level: "medium", max_output_tokens: 32768 };
   /* with a Claude key the script is written by Claude first (same prompt, same
      body); a failed or unparseable Claude reply is redone by Gemini, and the
@@ -511,7 +497,7 @@ async function lessonWriteScript(rows, cur, minutes){
     const nudge = attempt === 0 ? "" :
       "\n\nYour previous reply could not be parsed. Return ONLY the JSON object, starting " +
       "with { and ending with }. No fence, no text before it and none after it.";
-    const sys = lessonPrompt(minutes) + nudge;
+    const sys = prompt + nudge;
     const claudeTurn = !!settings.claudeKey && !(route.claudeFailed && settings.apiKey);
     const limitMs = SCRIPT_TIMEOUT_MS + (claudeTurn ? CLAUDE_SCRIPT_TIMEOUT_MS : 0);
     try {
@@ -536,7 +522,7 @@ async function lessonWriteScript(rows, cur, minutes){
           limitMs))
       ]);
       replies.push(String(reply || ""));
-      return lessonNormalise(lessonExtractJson(reply), payload.map((p) => p.es), cur);
+      return normalise(lessonExtractJson(reply));
     } catch (e) {
       if (/API \d{3}/.test((e && e.message) || "")) throw e;   // key, quota, model: do not retry
       if (e && e.claude) throw e;   // Claude failed with no Gemini key to hand it to: a second wait would fail the same way
@@ -547,7 +533,7 @@ async function lessonWriteScript(rows, cur, minutes){
      — a part that was cut is simply missing, the rest of the lesson stands */
   const longest = replies.sort((a, b) => b.length - a.length)[0];
   if (longest){
-    try { return lessonNormalise(lessonSalvageJson(longest), payload.map((p) => p.es), cur); }
+    try { return normalise(lessonSalvageJson(longest)); }
     catch (e) {}
   }
   throw new Error("대본을 만들지 못했습니다.\n" + ((lastErr && lastErr.message) || ""));
@@ -707,8 +693,10 @@ function taughtBefore(e, iso){
   if (e.d < iso) return e.d;
   return e.p && e.p < iso ? e.p : "";
 }
-function taughtRecent(iso){
-  const cut = isoAddDays(iso, -KNOWN_DAYS), all = taughtAll(), out = {};
+/* `days` is the window: KNOWN_DAYS for the story lessons, TEACH_DAYS (two
+   weeks) for the teacher lesson, which never picks a recent item again */
+function taughtRecent(iso, days){
+  const cut = isoAddDays(iso, -(days || KNOWN_DAYS)), all = taughtAll(), out = {};
   for (const k of Object.keys(all)){
     const d = taughtBefore(all[k], iso);
     if (d && d >= cut) out[k] = { d: d, n: all[k].n, es: all[k].es };
@@ -1772,7 +1760,7 @@ function lessonTimeline(lesson, sr){
     lesson.rows[i].until = (i + 1 < lesson.rows.length) ? lesson.rows[i + 1].start : total;
   }
   lesson.totalMs = total;
-  if (lesson.fmt === LESSON_FMT) lessonPartTimes(lesson);
+  if (lesson.fmt === LESSON_FMT || lesson.fmt === TEACH_FMT) lessonPartTimes(lesson);
   return lesson;
 }
 
@@ -1794,6 +1782,861 @@ function estimateMs(seg){
 function lessonEstimate(lesson){
   for (const s of lesson.segments) s.audioMs = estimateMs(s);
   return lessonTimeline(lesson);
+}
+
+/* ================================================================
+   The teacher lesson (fmt "teach1", 2026-11-11)
+
+   A warm Korean teacher and a Mexican speaker take turns. The AI writes the
+   dialogue of every item; this code places the native speaker's normal and
+   slow model reads, the pauses to repeat in and the tick before a recap
+   answer, then fits the whole to 10 or 20 minutes.
+
+   Two voices, never mixed: a "ko" turn is read by the Korean voice and may
+   not hold a single Latin letter; every Spanish piece is its own "es" turn.
+   Section names are shown on screen, never spoken, and spoken text carries
+   no symbols, emoji, list numbers or digits.
+
+   Content comes from the user's own log: today first, older days not yet
+   taught when today is thin, the words-es.js queue last (marked on screen).
+   Nothing taught in the last TEACH_DAYS days is picked again. The grammar
+   course is not used here and its stored state is left as it is.
+
+   The story builder above (lessonBuild and its parts) is no longer called;
+   lessons saved in that format still open, play and export from their rows.
+   ================================================================ */
+
+const TEACH_FMT = "teach1";
+const TEACH_DAYS = 14;
+const THIN_LINES = 6;                // fewer usable lines today than this: older days top it up
+const TEACH_LINES_TODAY = 60, TEACH_LINES_OLD = 24, TEACH_LIST_WORDS = 8, TEACH_AVOID_MAX = 40;
+const TEACH_SIZES = {
+  10: { words: 4, idioms: 1, sents: 2, recap: 3, targetMs: 600000, loMs: 570000, hiMs: 645000 },
+  20: { words: 6, idioms: 2, sents: 4, recap: 3, targetMs: 1200000, loMs: 1140000, hiMs: 1260000 }
+};
+const teachSize = (minutes) => TEACH_SIZES[Number(minutes) === 20 ? 20 : 10];
+const TEACH_TITLES = { open: "여는 말", recap: "복습", words: "단어", idiom: "숙어", sent: "오늘 쓴 문장", close: "마무리" };
+const TEACH_POINTS = 2;              // at most two explained changes per sentence
+const USE_WORDS = 12;
+/* small connecting words that get their own explanation when a sentence has one */
+const CONNECTORS = ["por", "para", "a", "al", "de", "del", "en", "con", "sin", "que", "porque", "pero", "y", "o",
+                    "si", "cuando", "como", "hasta", "desde"];
+/* pauses, seconds */
+const TP = { line: 0.6, model: 0.8, slow: 1.0, es: 0.9, think: 2.0, answer: 1.5, item: 1.2,
+             repMin: 2.4, repMax: 5.5, repPad: 1.2, repCap: 7.0 };
+const TEACH_SCALES = [0.8, 0.9, 1, 1.15, 1.3, 1.5];
+
+const LATIN_CH = /[A-Za-zÁÉÍÓÚÜÑáéíóúüñ]/;
+const GIMMICK_RE = /무기|치트키|챌린지|쿨다운|미션|퀘스트|필살기|레벨업/;
+/* a complete spoken Korean sentence ends like this (해요체, 합쇼체, a question) */
+const KO_END = /[요다죠까네]$/;
+/* emoji, arrows, circled numbers, dingbats, flags (surrogate pairs) — no \p{} here:
+   an older iPhone Safari refuses the whole file over a regex it cannot parse */
+const SAY_EMOJI = /[\uD800-\uDBFF][\uDC00-\uDFFF]|[←-⇿⌀-⏿①-⓿■-➿⬀-⯿㉐-㋿️‍⃣]/g;
+
+/* ---- numbers said as words ---- */
+const KO_DIG = ["영", "일", "이", "삼", "사", "오", "육", "칠", "팔", "구"];
+const KO_NATIVE = ["", "한", "두", "세", "네", "다섯", "여섯", "일곱", "여덟", "아홉", "열"];
+function numKo4(n){
+  let out = "", r = n;
+  for (const u of [[1000, "천"], [100, "백"], [10, "십"]]){
+    const q = Math.floor(r / u[0]);
+    if (q){ out += (q > 1 ? KO_DIG[q] : "") + u[1]; r -= q * u[0]; }
+  }
+  return out + (r ? KO_DIG[r] : "");
+}
+/* up to 99,999,999: 만 groups (15000 → 만오천) */
+function numKoInt(n){
+  if (n === 0) return "영";
+  const man = Math.floor(n / 10000), rest = n % 10000;
+  return (man ? (man > 1 ? numKo4(man) : "") + "만" : "") + (rest ? numKo4(rest) : "");
+}
+function numKo(m){
+  const parts = String(m).split(/[.,]/);
+  const n = Number(parts[0]);
+  const head = Number.isInteger(n) && n >= 0 && n < 100000000 ? numKoInt(n)
+    : parts[0].split("").map((d) => KO_DIG[Number(d)] || "").join(" ");
+  return parts[1] ? head + " 점 " + parts[1].split("").map((d) => KO_DIG[Number(d)] || "").join(" ") : head;
+}
+const ES_UNITS = ["cero", "uno", "dos", "tres", "cuatro", "cinco", "seis", "siete", "ocho", "nueve", "diez", "once", "doce",
+  "trece", "catorce", "quince", "dieciséis", "diecisiete", "dieciocho", "diecinueve", "veinte", "veintiuno", "veintidós",
+  "veintitrés", "veinticuatro", "veinticinco", "veintiséis", "veintisiete", "veintiocho", "veintinueve"];
+const ES_HUNDREDS = ["", "ciento", "doscientos", "trescientos", "cuatrocientos", "quinientos", "seiscientos", "setecientos",
+  "ochocientos", "novecientos"];
+const ES_TENS = ["", "", "", "treinta", "cuarenta", "cincuenta", "sesenta", "setenta", "ochenta", "noventa"];
+function numEs(m){
+  const parts = String(m).split(/[.,]/);
+  const n = Number(parts[0]);
+  /* up to 999,999: prices in pesos (150 → ciento cincuenta, 1500 → mil quinientos) */
+  const word = (k) => {
+    if (k < 30) return ES_UNITS[k];
+    if (k < 100) return ES_TENS[Math.floor(k / 10)] + (k % 10 ? " y " + ES_UNITS[k % 10] : "");
+    if (k === 100) return "cien";
+    if (k < 1000){
+      const h = Math.floor(k / 100), r = k % 100;
+      return ES_HUNDREDS[h] + (r ? " " + word(r) : "");
+    }
+    if (k < 1000000){
+      const th = Math.floor(k / 1000), r = k % 1000;
+      return (th === 1 ? "mil" : word(th).replace(/veintiuno$/, "veintiún").replace(/uno$/, "un") + " mil") + (r ? " " + word(r) : "");
+    }
+    return String(k).split("").map((d) => ES_UNITS[Number(d)]).join(" ");
+  };
+  const head = Number.isInteger(n) && n >= 0 ? word(n) : "";
+  return parts[1] ? head + " punto " + parts[1].split("").map((d) => ES_UNITS[Number(d)]).join(" ") : head;
+}
+
+/* What a voice actually reads: no emoji, no list number or bullet at the
+   start, digits as words, quotes and brackets gone, separators as a comma,
+   and nothing outside the letters of its own language and . , ? ! (plus ¡ ¿
+   for Spanish). Latin letters are kept on the Korean side only so that the
+   caller can still see them and refuse the turn. */
+function speakClean(s, es){
+  let t = String(s || "").replace(SAY_EMOJI, " ");
+  t = t.replace(/^\s*(?:\(?\d{1,2}\s*[.)]|[-*•·]|#+)\s*/, "");
+  /* thousands separators (15,000 / 1,500) are not decimals */
+  t = t.replace(/(\d)[,.](?=\d{3}(?!\d))/g, "$1");
+  if (es) t = t.replace(/\d+(?:[.,]\d+)?/g, (m) => " " + numEs(m) + " ");
+  else {
+    /* counted things take the native numbers (두 개, 한 번); the rest Sino-Korean (십일월) */
+    t = t.replace(/(\d+)\s*(개|명|번|시간|시|살|잔|그릇|마리|병|장|가지|군데|달|사람)/g, (all, d, u) => {
+      const n = Number(d);
+      return n >= 1 && n <= 10 ? KO_NATIVE[n] + " " + u : all;
+    });
+    t = t.replace(/\d+(?:[.,]\d+)?/g, (m) => numKo(m));
+    /* a quote glued to a particle goes without a gap («열다»예요 → 열다예요),
+       and a full stop inside it with it («줄게.»예요 → 줄게예요) */
+    t = t.replace(/([.?!])[»”’"']+(?=[가-힣])/g, "").replace(/[«»“”"‘’'`]/g, "");
+    /* «~로» in an explanation: said as 뭐뭐로, never as a symbol */
+    t = t.replace(/~\s*(?=[가-힣])/g, "뭐뭐");
+  }
+  t = t.replace(/~/g, " ").replace(/[«»“”"‘’'`()[\]{}<>*#_=+\\^@&%$|]/g, " ")
+       .replace(/\s*[·•—–:;/→↔…]+\s*/g, ", ");
+  t = t.replace(es ? /[^A-Za-zÁÉÍÓÚÜÑáéíóúüñ¡¿.,?! ]/g : /[^가-힣A-Za-zÁÉÍÓÚÜÑáéíóúüñ.,?! ]/g, " ");
+  return t.replace(/\s+/g, " ").replace(/\s+([.,?!])/g, "$1").replace(/([.,?!])[.,]+/g, "$1")
+          .replace(/^[\s.,?!]+/, "").replace(/[\s,]+$/, "").replace(/[¡¿]+$/, "").trim();
+}
+
+/* stretches of Latin letters with no Hangul between them */
+function latinSpans(s){
+  const out = [];
+  let a = -1, b = -1;
+  for (let i = 0; i < s.length; i++){
+    const ch = s[i];
+    if (LATIN_CH.test(ch)){ if (a < 0) a = i; b = i; }
+    else if (/[가-힣]/.test(ch) && a >= 0){ out.push([a, b + 1]); a = -1; }
+  }
+  if (a >= 0) out.push([a, b + 1]);
+  return out;
+}
+
+/* A turn is { who, shown, say, pause }: `shown` for the screen, `say` for the voice. */
+function esTurn(text, pause, diag){
+  const t = cleanStr(text).replace(/[«»“”"]/g, "").trim();
+  if (!t || hasKo(t) || !LATIN_CH.test(t)){ if (diag) diag.dropped++; return []; }
+  const say = speakClean(t, true);
+  return say && LATIN_CH.test(say) ? [{ who: "es", shown: t, say: say, pause: pause || "" }] : [];
+}
+const trimShown = (s) => String(s || "").replace(/^[\s»”’"',.:;·—–-]+/, "").replace(/[\s«“‘"':,·—–-]+$/, "").trim();
+function koOnly(shown, pause){
+  let say = speakClean(shown, false);
+  if (!hasKo(say) || LATIN_CH.test(say)) return null;
+  if (!/[.?!]$/.test(say)) say += ".";
+  return { who: "ko", shown: trimShown(shown), say: say, pause: pause || "" };
+}
+/* A Korean turn, checked. Returns the turn(s), or null when it has to be
+   refused: a gimmick word, a grammar term out in the open, or Spanish in the
+   middle of the sentence. Spanish at the very start or end is moved into its
+   own "es" turn, as long as the Korean left over is a whole sentence. */
+function koTurn(text, pause, diag){
+  const t0 = cleanStr(text);
+  if (!t0) return [];
+  const refuse = () => { if (diag) diag.rejected++; return null; };
+  if (GIMMICK_RE.test(t0) || BAN_RE.test(t0.replace(/\([^()]*\)/g, ""))) return refuse();
+  const t = t0.replace(/\(([^()]*)\)/g, (all, inner) => (BAN_RE.test(inner) ? "" : all)).trim();
+  if (!hasKo(t)){ if (diag) diag.split++; return esTurn(t, pause, diag); }
+  const spans = latinSpans(t);
+  if (!spans.length){ const k = koOnly(t, pause); return k ? [k] : refuse(); }
+  if (spans.length !== 1) return refuse();
+  let a = spans[0][0], b = spans[0][1];
+  while (a > 0 && /[¡¿]/.test(t[a - 1])) a--;
+  while (b < t.length && /[.!?]/.test(t[b])) b++;
+  const before = t.slice(0, a), after = t.slice(b), es = t.slice(a, b);
+  const atEnd = !hasKo(after), atStart = !hasKo(before);
+  if (!atEnd && !atStart) return refuse();
+  /* «Abre»는 … / «Da»예요: Hangul glued to the Spanish is its particle, and would be left dangling */
+  if (atStart && /^[»”’"')\]]*[가-힣]/.test(after)) return refuse();
+  const k = koOnly(atEnd ? before : after, "");
+  const e = esTurn(es, "", null);
+  if (!k || !e.length || !KO_END.test(k.say.replace(/[.?!]+$/, ""))) return refuse();
+  if (diag) diag.split++;
+  const pair = atEnd ? [k, e[0]] : [e[0], k];
+  pair[1].pause = pause || "";
+  return pair;
+}
+/* a list of turns; a refused Korean turn becomes a placeholder that the
+   builder fills with a safe line of its own */
+function teachTurns(list, diag){
+  const out = [];
+  for (const x of (Array.isArray(list) ? list : [])){
+    const o = asObj(x);
+    if (!o) continue;
+    const pause = o.pause === "repeat" ? "repeat" : "";
+    const got = o.who === "es" ? esTurn(o.text, pause, diag) : o.who === "ko" ? koTurn(o.text, pause, diag) : [];
+    if (got === null) out.push({ who: "ko", shown: "", say: "", pause: pause, safe: true });
+    else for (const g of got) out.push(g);
+  }
+  return out;
+}
+/* one Korean cue line, or null */
+function cueTurn(s, diag){
+  const got = koTurn(s, "", diag);
+  return got && got.length === 1 && got[0].who === "ko" ? got[0] : null;
+}
+const realKo = (turns) => turns.some((t) => t.who === "ko" && !t.safe);
+
+function teachUse(o, diag){
+  const x = asObj(o);
+  if (!x) return null;
+  const es = cleanStr(x.es).replace(/[«»“”"]/g, "").trim(), ko = cleanStr(x.ko);
+  if (!es || hasKo(es) || !LATIN_CH.test(es) || wordCount(es) > USE_WORDS || !hasKo(ko) || LATIN_CH.test(ko)) return null;
+  const say = speakClean(es, true);
+  return say ? { es: es, ko: ko, say: say, lead: teachTurns(x.lead, diag) } : null;
+}
+/* the reasons for one sentence: at most TEACH_POINTS, each with a real Korean line */
+function teachPoints(list, diag){
+  const out = [];
+  let valid = 0;
+  for (const x of (Array.isArray(list) ? list : [])){
+    const o = asObj(x);
+    if (!o) continue;
+    const turns = teachTurns(o.turns, diag);
+    if (!realKo(turns)) continue;
+    valid++;
+    if (out.length < TEACH_POINTS) out.push({ about: cleanStr(o.about), turns: turns });
+  }
+  if (valid > TEACH_POINTS) diag.pointsCut++;
+  return out;
+}
+/* the connecting words of `es` that none of its points talks about */
+function connectorsLeft(es, points){
+  const toks = foldEs(es).split(/[^a-zñ]+/).filter(Boolean);
+  const said = new Set();
+  for (const p of points){
+    for (const t of foldEs(p.about).split(/[^a-zñ]+/)) if (t) said.add(t);
+    for (const t of p.turns) if (t.who === "es") for (const w of foldEs(t.say).split(/[^a-zñ]+/)) if (w) said.add(w);
+  }
+  return Array.from(new Set(toks.filter((t) => CONNECTORS.indexOf(t) >= 0 && !said.has(t))));
+}
+
+/* ---- what may be taught today ---- */
+function teachPlan(todayRows, allLog, iso, minutes){
+  const size = teachSize(minutes);
+  const recent = taughtRecent(iso, TEACH_DAYS);
+  const all = taughtAll();
+  const cut = isoAddDays(iso, -TEACH_DAYS);
+  const learned = newWordsLearned();
+  /* list words from the last two weeks; a 다시 만들기 today sees what the first make saw */
+  const listRecent = Object.keys(learned).filter((w) => learned[w].d >= cut && learned[w].d < iso);
+  const lineOf = (e, day) => {
+    const es = cleanStr(spanishOf(e)), ko = cleanStr(koreanOf(e));
+    /* the Korean side may be read aloud (a sentence's meaning): Hangul, no Latin */
+    return es && hasKo(ko) && !LATIN_CH.test(ko) && LATIN_CH.test(es) && !hasKo(es) ? { es: es, ko: ko, day: day } : null;
+  };
+  const seen = new Set(), lines = [];
+  const add = (l) => {
+    const k = reviewKey(l.es);
+    if (!k || seen.has(k)) return false;
+    seen.add(k); lines.push(l);
+    return true;
+  };
+  for (const e of (Array.isArray(todayRows) ? todayRows : [])){
+    if (lines.length >= TEACH_LINES_TODAY) break;
+    const l = lineOf(e, iso);
+    if (l && !recent[taughtId("s", l.es)]) add(l);
+  }
+  const todayN = lines.length;
+  if (todayN < THIN_LINES){
+    /* older days, newest first, lines never taught as a sentence */
+    const everS = (es) => { const e = all[taughtId("s", es)]; return !!(e && taughtBefore(e, iso)); };
+    const older = (Array.isArray(allLog) ? allLog : [])
+      .filter((e) => e && e.at)
+      .map((e) => ({ e: e, d: studyDate(e.at) }))
+      .filter((x) => x.d && x.d < iso)
+      .sort((a, b) => b.d.localeCompare(a.d) || String(a.e.at).localeCompare(String(b.e.at)));
+    let n = 0;
+    for (const x of older){
+      if (n >= TEACH_LINES_OLD) break;
+      const l = lineOf(x.e, x.d);
+      if (l && !everS(l.es) && add(l)) n++;
+    }
+  }
+  const pick = newWordsPick(iso, lines.map((l) => l.es));
+  const wordList = pick.words.filter((w) => listRecent.indexOf(w) < 0 && !recent[taughtId("v", w)])
+    .slice(0, TEACH_LIST_WORDS);
+  const avoid = { words: listRecent.slice(), idioms: [], sentences: [] };
+  const keys = Object.keys(recent).sort((a, b) => recent[b].d.localeCompare(recent[a].d));
+  for (const k of keys){
+    const t = k.split(":")[0], es = recent[k].es;
+    if (!es) continue;
+    const f = t === "v" ? "words" : t === "i" ? "idioms" : t === "s" ? "sentences" : "";
+    if (f && avoid[f].length < TEACH_AVOID_MAX) avoid[f].push(es);
+  }
+  return { iso: iso, minutes: Number(minutes) === 20 ? 20 : 10, size: size, lines: lines, todayN: todayN,
+           thin: todayN < THIN_LINES, wordList: wordList, recent: recent, avoid: avoid,
+           listRecent: listRecent };
+}
+
+/* the request body: the lines to choose from, the fallback words, what to avoid, how many */
+function teachBody(plan){
+  return JSON.stringify({
+    lines: plan.lines.map((l) => ({ es: l.es, ko: l.ko, day: l.day === plan.iso ? "today" : l.day })),
+    word_list: plan.wordList,
+    avoid: plan.avoid,
+    want: { words: plan.size.words + 1, idioms: plan.size.idioms + 1, sentences: plan.size.sents + 1 }
+  });
+}
+
+function teachPrompt(){
+  return [
+  "You write one spoken Spanish lesson as a dialogue between two voices: a warm, experienced Korean tutor",
+  "(the \"ko\" voice) and a Mexican native speaker (the \"es\" voice). The learner is a Korean who runs a Korean",
+  "restaurant in Mexico, a complete beginner, listening alone in the car. The app reads every turn aloud",
+  "with two different text-to-speech voices, and adds the native speaker's normal and slow model reads, the",
+  "pauses to repeat in and all timing. You write what is said.",
+  "",
+  "INPUT — one JSON object:",
+  "  lines     — what the learner actually said or heard: es, ko, day (\"today\" or a date). Today's lines",
+  "              come first; older days are there only because today was thin.",
+  "  word_list — fallback beginner words, in course order (may be empty).",
+  "  avoid     — words, idioms and sentences taught in the last 14 days. Never pick any of them.",
+  "  want      — how many words, idioms and sentences to write. Each count has ONE spare in it, so the",
+  "              app can drop one that clashes.",
+  "",
+  "WHAT TO PICK",
+  "- words: single useful words (verbs, nouns, adjectives) that appear in lines. es is the plain dictionary",
+  "  form (abrir, not ábrelo; olla, not ollas); heard is the exact line it came from. Only if lines cannot",
+  "  give enough, take from word_list and set source \"list\". Never greetings, names, numbers, yes or no.",
+  "- idioms: a set expression from lines if there is one (source \"log\"); otherwise a common Mexican one",
+  "  that fits one of the lines (source \"common\"). Only expressions you are certain are in daily use.",
+  "- sentences: lines copied exactly (es and ko as given), short and useful, at most ten words.",
+  "- Prefer today's lines. Never anything listed in avoid.",
+  "",
+  "THE TWO VOICES — the most important rule",
+  "- A \"ko\" turn is read by a Korean voice. It must NEVER contain a Latin letter: no Spanish word, no",
+  "  letter, no ending like -ar. Every Spanish piece is its own \"es\" turn.",
+  "- Finish the Korean sentence first; the Spanish turn comes after it. Never put Spanish inside a",
+  "  Korean sentence.",
+  "  Wrong: {\"who\":\"ko\",\"text\":\"da 끝에 나에게 me, 그거 lo 를 붙여요.\"}",
+  "  Right: {\"who\":\"ko\",\"text\":\"먼저 «줘»예요.\"}, {\"who\":\"es\",\"text\":\"Da.\"}, {\"who\":\"ko\",\"text\":\"다음은 «나한테»예요.\"}, {\"who\":\"es\",\"text\":\"Me.\"}",
+  "- To talk about an ending, say it in Hangul (아르로 끝나는 말, 에르나 이르로 끝나는 말) or let the es",
+  "  voice say a whole example word.",
+  "- An \"es\" turn holds Spanish only, never Hangul.",
+  "- No digits, symbols, list numbers, emoji or section names in any turn. Numbers are written as words.",
+  "",
+  "HOW THE TEACHER TALKS",
+  "- Like a warm, experienced Korean tutor talking to one adult: natural spoken 해요체, complete sentences,",
+  "  natural connectors (자, 이번엔, 아까 그, 기억나시죠?, 그래서, 그런데).",
+  "- Vary the phrasing. Never use the same cue line twice in a row (따라 해 보세요 / 소리 내서 한번 해",
+  "  보세요 / 입으로 한번 말해 볼까요?).",
+  "- No gimmick words (무기, 치트키, 챌린지, 쿨다운, 미션, 퀘스트). No fragments such as «첫 번째.» or «손님.».",
+  "- Kid-simple. No grammar terms (동사, 명사, 형용사, 전치사, 대명사, 명령형, 시제, 인칭, 접속법 …): say what",
+  "  the word DOES instead.",
+  "- Never state facts about the learner, the staff, customers, prices or times that the lines do not say.",
+  "",
+  "SAY WHY, BRIEFLY — when a word changes shape, give the reason in one or two short lines, not only that",
+  "it changed:",
+  "- Telling a friend to do something (abrir → abre): «친구한테 시키는 모양은 '그 사람이 ~한다'는 모양과",
+  "  똑같아요. 그래서 '그가 연다'가 그대로 '열어!'가 돼요.» Then the rule once: «아르로 끝나는 말은 '아'로,",
+  "  에르나 이르로 끝나는 말은 '에'로 끝나요.»",
+  "- The short irregular ones (pon, ten, ven, di, haz, sal, sé, ve): «자주 쓰는 짧은 말 몇 개는 따로 외우는",
+  "  모양이에요.»",
+  "- Who does it (como, comes, come): the ending already tells who, so Spanish often leaves out 나 or 너.",
+  "- Matching (frío, fría, fríos): a describing word follows the thing it describes, in a or o, one or many.",
+  "- Little attached words (lo, la, le, me, se): they mean 그거, 나한테 and so on; on an order they stick to the",
+  "  end, otherwise they come in front.",
+  "- ser and estar: ser for what something is, estar for how or where it is right now.",
+  "- Small connecting words (por, para, a, de, en, con, que, porque, pero, y, o, si, cuando …): say what kind",
+  "  of word it is in plain Korean («앞에 붙어서 뒤의 말과 한 덩어리가 되는 말이에요. 한국어 조사가 앞으로 온",
+  "  거라고 보면 돼요.» or «문장과 문장을 잇는 말이에요.»), what it does in THIS sentence, and one tiny contrast",
+  "  where useful, above all por and para (por: ~로 맞바꿔서, ~때문에, ~를 거쳐 / para: ~를 위해, ~까지, ~쪽으로).",
+  "  The Spanish word itself is always its own es turn.",
+  "- At most TWO explained points per sentence (why has at most two entries). Pick the most useful ones;",
+  "  small words count.",
+  "",
+  "OUTPUT — ONE JSON object and nothing else: no fence, no commentary. A turn is {\"who\":\"ko\"|\"es\",\"text\":\"\"}.",
+  "{",
+  " \"opening\": \"\",",
+  " \"words\": [{\"es\":\"\",\"ko\":\"\",\"source\":\"log|list\",\"heard\":\"\",\"intro\":[],\"repeat_cue\":\"\",",
+  "            \"use\":{\"lead\":[],\"es\":\"\",\"ko\":\"\"},\"why\":[{\"about\":\"\",\"turns\":[]}],\"whole_cue\":\"\"}],",
+  " \"idioms\": [{\"es\":\"\",\"ko\":\"\",\"source\":\"log|common\",\"heard\":\"\",\"literal\":[],\"meaning\":[],\"repeat_cue\":\"\",",
+  "             \"use\":{\"lead\":[],\"es\":\"\",\"ko\":\"\"},\"why\":[{\"about\":\"\",\"turns\":[]}],\"whole_cue\":\"\"}],",
+  " \"sentences\": [{\"es\":\"\",\"ko\":\"\",\"intro\":[],\"why\":[{\"about\":\"\",\"turns\":[]}],",
+  "                \"variation\":{\"word\":\"\",\"lead\":[],\"es\":\"\",\"ko\":\"\"},\"repeat_cue\":\"\"}],",
+  " \"takeaway\": {\"es\":\"\",\"ko\":\"\",\"lead\":[]},",
+  " \"goodbye\": \"\"",
+  "}",
+  "",
+  "WHAT EACH PART IS FOR (the app adds the native speaker's reads and the pauses):",
+  "- opening: ONE Korean line about today's theme. The app says the date before it.",
+  "- words[].intro: the meaning, as a complete sentence («먼저 «열다»예요.»). The app then plays the word,",
+  "  normal and slow, then repeat_cue and a pause.",
+  "- words[].use: a simple usage sentence (at most eight words) with the word. lead gives its Korean",
+  "  meaning in a sentence («문장으로 해 볼게요. «냉장고 좀 열어 줘.»»); the app plays use.es after the lead.",
+  "- words[].why: the reasons, as alternating ko and es turns; about is the Spanish bit explained. If",
+  "  use.es has the word in a changed shape, the first point explains why. A small connecting word in",
+  "  use.es gets a point too, within the limit of two.",
+  "- words[].whole_cue: the cue before the learner says the whole sentence; the app then plays it again.",
+  "- idioms[]: literal is the words one by one in Korean; meaning is what it really means and when to say",
+  "  it. Then use, why and whole_cue as for words.",
+  "- sentences[].intro: say it is something the learner said (오늘 하신 말, or 며칠 전에 하신 말 for an older",
+  "  day) and give the Korean meaning; the app plays it normal and slow. why as above. variation changes",
+  "  ONE word to another of today's words (variation.word is that word's es): lead in Korean («'바꾸다'",
+  "  자리에 '열다'만 넣어 볼게요.»), es and ko the changed sentence. repeat_cue comes before the pause after it.",
+  "- takeaway: one of today's sentences or usage sentences to take home; lead introduces it.",
+  "- goodbye: one short, warm Korean goodbye.",
+  "",
+  "LENGTH — the lesson is listened to for its full length, so the teacher really talks:",
+  "- each word: about one minute. intro in two turns (the meaning, then when they would say it at work);",
+  "  why with two points of three to five turns each.",
+  "- each idiom: about a minute and a half. literal two turns, meaning two turns, why two points.",
+  "- each sentence: about a minute and a half. intro two turns (that they said it, and the meaning); why",
+  "  two points of three to five turns; variation lead two turns (what is swapped, and the new meaning).",
+  "- Korean turns of one or two sentences each (about 20 to 80 characters). Spanish turns short.",
+  "",
+  "SPANISH: correct, natural Mexican Spanish; keep accents and ¡ ¿. caliente is for food and things only;",
+  "food words only in their food meaning.",
+  "",
+  "EXAMPLE of one word (follow its voice rule, its turns and its tone):",
+  "{\"es\":\"abrir\",\"ko\":\"열다\",\"source\":\"log\",\"heard\":\"Ábrelo, por favor.\",",
+  " \"intro\":[{\"who\":\"ko\",\"text\":\"먼저 «열다»예요.\"}], \"repeat_cue\":\"따라 해 보세요.\",",
+  " \"use\":{\"lead\":[{\"who\":\"ko\",\"text\":\"문장으로 해 볼게요. «냉장고 좀 열어 줘.»\"}],\"es\":\"Abre el refri, por favor.\",\"ko\":\"냉장고 좀 열어 줘.\"},",
+  " \"why\":[{\"about\":\"abre\",\"turns\":[{\"who\":\"ko\",\"text\":\"원래 모양은 이거였죠.\"},{\"who\":\"es\",\"text\":\"Abrir.\"},",
+  "   {\"who\":\"ko\",\"text\":\"친구한테 시키는 모양은 '그 사람이 연다'는 모양과 똑같아요. 그래서 '그가 연다'가 그대로 '열어!'가 돼요.\"},",
+  "   {\"who\":\"es\",\"text\":\"Abre.\"}]}],",
+  " \"whole_cue\":\"이제 문장 전체를 따라 해 보세요.\"}"
+  ].join("\n");
+}
+
+/* the plan line that holds `es`, if any */
+function teachLineFor(es, plan){
+  if (!cleanStr(es)) return null;
+  return plan.lines.find((l) => phraseIn(es, l.es)) || null;
+}
+/* an idiom said in a line in another person or tense: its content words after the verb are there */
+function idiomLine(es, plan){
+  const exact = teachLineFor(es, plan);
+  if (exact) return exact;
+  const toks = foldEs(es).split(/[^a-zñ]+/).filter(Boolean).slice(1).filter((t) => t.length >= 4);
+  if (!toks.length) return null;
+  return plan.lines.find((l) => { const have = new Set(foldEs(l.es).split(/[^a-zñ]+/)); return toks.every((t) => have.has(t)); }) || null;
+}
+const plainEs = (s) => cleanStr(s).replace(/[«»“”"]/g, "").replace(/^[¡¿]+|[.,!?]+$/g, "").trim();
+const esOk = (es) => !!es && !hasKo(es) && LATIN_CH.test(es);
+
+/* The reply, checked and cleaned. Throws only when nothing usable is left. */
+function teachNormalise(raw, plan){
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) throw new Error("대본 형식이 올바르지 않습니다.");
+  const diag = { rejected: 0, split: 0, dropped: 0, whyDropped: 0, varDropped: 0, recent: 0, notInLog: 0,
+                 pointsCut: 0, connectorsLeft: [] };
+  const recent = (t, es) => !!plan.recent[taughtId(t, es)];
+  const listSet = new Set(plan.wordList.map(foldEs));
+  const listRecent = new Set((plan.listRecent || []).map(foldEs));
+  const S = plan.size;
+  const koOk = (s) => hasKo(s) && !LATIN_CH.test(s);
+  const withUse = (o, es) => {
+    let use = teachUse(o.use, diag);
+    const why = use ? teachPoints(o.why, diag) : [];
+    if (use && !phraseIn(es, use.es) && !why.length){ use = null; diag.whyDropped++; }
+    if (use){ const left = connectorsLeft(use.es, why); if (left.length && why.length < TEACH_POINTS) diag.connectorsLeft.push(use.es + ": " + left.join(",")); }
+    return { use: use, why: use ? why : [], wholeCue: cueTurn(o.whole_cue, diag) };
+  };
+
+  const words = [], wseen = new Set();
+  for (const x of (Array.isArray(raw.words) ? raw.words : [])){
+    const o = asObj(x);
+    if (!o) continue;
+    const es = plainEs(o.es), ko = cleanStr(o.ko);
+    if (!esOk(es) || wordCount(es) > 3 || !koOk(ko) || wseen.has(foldEs(es))) continue;
+    if (recent("v", es) || listRecent.has(foldEs(es))){ diag.recent++; continue; }
+    const fromList = o.source === "list";
+    const line = fromList ? null : (teachLineFor(o.heard, plan) || teachLineFor(es, plan));
+    if (fromList ? !listSet.has(foldEs(es)) : !line){ diag.notInLog++; continue; }
+    wseen.add(foldEs(es));
+    words.push(Object.assign({ es: es, ko: ko, source: fromList ? "list" : "log", day: line ? line.day : "",
+      intro: teachTurns(o.intro, diag), repeatCue: cueTurn(o.repeat_cue, diag) }, withUse(o, es)));
+  }
+  const logW = words.filter((w) => w.source === "log");
+  const pickedWords = logW.slice(0, S.words).concat(words.filter((w) => w.source === "list").slice(0, Math.max(0, S.words - logW.length)));
+
+  const idioms = [], iseen = new Set();
+  for (const x of (Array.isArray(raw.idioms) ? raw.idioms : [])){
+    const o = asObj(x);
+    if (!o) continue;
+    const es = plainEs(o.es), ko = cleanStr(o.ko);
+    if (!esOk(es) || wordCount(es) > 6 || !koOk(ko) || iseen.has(foldEs(es))) continue;
+    if (recent("i", es)){ diag.recent++; continue; }
+    const line = idiomLine(o.heard, plan) || idiomLine(es, plan);
+    iseen.add(foldEs(es));
+    idioms.push(Object.assign({ es: es, ko: ko, source: line ? "log" : "common", day: line ? line.day : "",
+      literal: teachTurns(o.literal, diag), meaning: teachTurns(o.meaning, diag),
+      repeatCue: cueTurn(o.repeat_cue, diag) }, withUse(o, es)));
+    if (idioms.length >= S.idioms) break;
+  }
+
+  const sents = [], sseen = new Set();
+  for (const x of (Array.isArray(raw.sentences) ? raw.sentences : [])){
+    const o = asObj(x);
+    if (!o) continue;
+    const es = cleanStr(o.es).replace(/[«»“”"]/g, "").trim();
+    const k = reviewKey(es);
+    const line = plan.lines.find((l) => reviewKey(l.es) === k) ||
+      (wordCount(es) >= 3 ? plan.lines.find((l) => (" " + reviewKey(l.es) + " ").indexOf(" " + k + " ") >= 0) : null);
+    if (!esOk(es) || !line || sseen.has(k)){ if (esOk(es) && !line) diag.notInLog++; continue; }
+    if (recent("s", es) || recent("s", line.es)){ diag.recent++; continue; }
+    const ko = koOk(cleanStr(o.ko)) ? cleanStr(o.ko) : line.ko;
+    const why = teachPoints(o.why, diag);
+    const left = connectorsLeft(es, why);
+    if (left.length && why.length < TEACH_POINTS) diag.connectorsLeft.push(es + ": " + left.join(","));
+    const v = asObj(o.variation);
+    const vEs = v ? cleanStr(v.es).replace(/[«»“”"]/g, "").trim() : "";
+    const variation = v && esOk(vEs) && koOk(cleanStr(v.ko)) && wordCount(vEs) <= USE_WORDS && reviewKey(vEs) !== k
+      ? { word: plainEs(v.word), es: vEs, ko: cleanStr(v.ko), say: speakClean(vEs, true), lead: teachTurns(v.lead, diag) } : null;
+    sseen.add(k);
+    sents.push({ es: es, ko: ko, say: speakClean(es, true), day: line.day, intro: teachTurns(o.intro, diag),
+                 why: why, variation: variation, repeatCue: cueTurn(o.repeat_cue, diag) });
+    if (sents.length >= S.sents) break;
+  }
+  /* a variation has to use one of today's words */
+  const wordSet = new Set(pickedWords.map((w) => foldEs(w.es)));
+  for (const s of sents){
+    if (s.variation && !wordSet.has(foldEs(s.variation.word))){ s.variation = null; diag.varDropped++; }
+  }
+  if (!pickedWords.length && !sents.length) throw new Error("대본에 단어도 문장도 없습니다.");
+
+  /* the take-away is one of today's sentences, or a usage sentence */
+  const candidates = sents.map((s) => ({ es: s.es, ko: s.ko }))
+    .concat(pickedWords.concat(idioms).filter((w) => w.use).map((w) => ({ es: w.use.es, ko: w.use.ko })));
+  const tk = asObj(raw.takeaway);
+  const hit = tk ? candidates.find((c) => reviewKey(c.es) === reviewKey(tk.es)) : null;
+  const takeBase = hit || candidates[0] || null;
+  const takeaway = takeBase ? { es: takeBase.es, ko: takeBase.ko, say: speakClean(takeBase.es, true),
+                                lead: hit ? teachTurns(tk.lead, diag) : [] } : null;
+
+  const op = koTurn(raw.opening, "", diag);
+  return {
+    fmt: TEACH_FMT,
+    opening: op && op.length === 1 && op[0].who === "ko" ? op[0] : null,
+    words: pickedWords, idioms: idioms, sents: sents, takeaway: takeaway,
+    goodbye: cueTurn(raw.goodbye, diag), diag: diag
+  };
+}
+
+/* ---- the code's own lines: varied, never the same twice in a row ---- */
+const hasBatchim = (s) => {
+  const c = String(s || "").replace(/[^가-힣]+$/, "");
+  const ch = c.charCodeAt(c.length - 1);
+  return ch >= 0xAC00 && ch <= 0xD7A3 && (ch - 0xAC00) % 28 !== 0;
+};
+const ida = (s) => (hasBatchim(s) ? "이에요" : "예요");
+const koPlain = (s) => speakClean(sayKo(s), false).replace(/[.?!]+$/, "");
+const TEACH_POOL = {
+  open: [(d) => d + " 수업이에요.", (d) => "안녕하세요. " + d + " 수업 시작할게요.", (d) => d + " 수업, 같이 시작해 봐요."],
+  theme: ["오늘은 실제로 쓰신 말로 공부해 볼게요.", "오늘도 직접 하신 말들 중에서 골라 왔어요.", "오늘은 대화에서 나온 말로 같이 연습해 봐요."],
+  recapLead: ["먼저 지난번에 배운 거 몇 가지만 떠올려 볼게요. 제가 한국어로 물으면, 정답이 나오기 전에 먼저 말해 보세요.",
+              "시작하기 전에 지난번 거 잠깐 떠올려 봐요. 제가 물어보면 먼저 스페인어로 말해 보세요."],
+  recapAsk: [(k) => k + ". 스페인어로 뭐였죠?", (k) => "기억나시죠? " + k + ". 어떻게 말했죠?", (k) => k + ". 이건 뭐라고 했죠?"],
+  recapEnd: ["좋아요. 이제 오늘 거 볼게요.", "잘하셨어요. 그럼 오늘 공부 시작해요."],
+  wordIntro: [(k) => "먼저 " + k + ida(k) + ".", (k) => "다음은 " + k + ida(k) + ".", (k) => "이번엔 " + k + ida(k) + "."],
+  useLead: [(k) => "문장으로 해 볼게요. " + k + ".", (k) => "이렇게 써요. " + k + "."],
+  idiomIntro: [(k) => "이번엔 숙어 하나 볼게요. 뜻은 " + k + ida(k) + "."],
+  sentIntro: [(k) => "이번엔 실제로 하신 말이에요. " + k + ".", (k) => "다음도 하신 말이에요. " + k + "."],
+  varLead: ["한 군데만 바꿔 볼게요."],
+  repeat: ["따라 해 보세요.", "소리 내서 한번 해 보세요.", "입으로 한번 따라 해 볼까요?", "이번엔 직접 말해 보세요."],
+  whole: ["이제 문장 전체를 따라 해 보세요.", "처음부터 끝까지 이어서 말해 보세요.", "문장 통째로 한번 해 볼게요."],
+  again: ["한 번 더 들어 볼게요.", "다시 한번 들어 보세요.", "한 번만 더 갈게요."],
+  safe: ["이 부분은 소리로 잘 들어 보세요.", "잘 들어 보세요.", "이 소리를 귀에 담아 두세요."],
+  recallWords: ["끝내기 전에 오늘 배운 말을 한 번씩 떠올려 볼게요. 제가 뜻을 말하면 먼저 스페인어로 말해 보세요.",
+                "마무리하기 전에 오늘 단어들 한 번씩 꺼내 볼까요? 정답 나오기 전에 먼저 말해 보세요."],
+  recallSents: ["이번엔 오늘 문장이에요. 조금 기니까 천천히 떠올려 보세요.", "문장도 한 번씩 떠올려 볼게요. 뜻을 듣고 먼저 말해 보세요."],
+  recallAgain: ["한 바퀴만 더 돌아볼게요. 이번엔 거꾸로, 뒤에서부터 물어볼게요."],
+  take: ["오늘 하나만 가져가신다면 이 문장이에요.", "오늘 꼭 기억할 문장 하나만 다시 들어 볼게요."],
+  bye: ["오늘도 수고 많으셨어요. 내일 또 만나요.", "오늘 수업은 여기까지예요. 운전 조심하세요."]
+};
+function teachPicker(seed){
+  let n = Math.abs(seed | 0), last = "";
+  return (pool, arg) => {
+    for (let k = 0; k < pool.length; k++){
+      const x = pool[(n + k) % pool.length];
+      const s = typeof x === "function" ? x(arg) : x;
+      if (s !== last || k === pool.length - 1){ n = n + k + 1; last = s; return s; }
+    }
+    return "";
+  };
+}
+
+/* ---- the recap: three items of the last saved lesson, any format ---- */
+function teachRecap(prev, iso, n){
+  if (!asObj(prev) || !prev.date || !(String(prev.date) < iso)) return null;
+  const asked = reviewAsked(prev.qa);
+  const all = reviewItemsFrom(prev).map((it) => {
+    const koSay = koPlain(it.ko), esSay = speakClean(it.es, true);
+    return koSay && !LATIN_CH.test(koSay) && esSay ? Object.assign(it, { koSay: koSay, esSay: esSay, hit: reviewHit(it, asked) }) : null;
+  }).filter(Boolean);
+  if (!all.length) return null;
+  const take = [], used = new Set();
+  const put = (it) => { if (it && !used.has(it) && take.length < n){ used.add(it); take.push(it); } };
+  for (const it of all) if (it.hit) put(it);
+  for (const t of ["sent", "expr", "idiom", "frame"]) put(all.find((it) => it.type === t && !used.has(it)));
+  for (const it of all) put(it);
+  take.sort((a, b) => a.order - b.order);
+  const d = new Date(Number(iso.slice(0, 4)), Number(iso.slice(5, 7)) - 1, Number(iso.slice(8, 10)) - 1, 12);
+  return { date: String(prev.date), yesterday: studyDate(d) === String(prev.date), items: take };
+}
+
+const isoLabel = (iso) => Number(iso.slice(5, 7)) + "월 " + Number(iso.slice(8, 10)) + "일";
+
+/* One fitting of the lesson: `level` adds repetition rounds, `scale` stretches
+   the pauses to repeat in. Returns the parts in order. */
+function teachParts(c, ctx, level, scale){
+  const pick = teachPicker(ctx.dn);
+  const st = { lastKo: "", lastCue: "" };
+  const gap = (es) => {
+    const sec = estimateMs({ speaker: "es", text: String(es || ""), rate: 1 }) / 1000 + TP.repPad;
+    return Math.round(Math.min(TP.repCap, Math.min(TP.repMax, Math.max(TP.repMin, sec)) * scale) * 10) / 10;
+  };
+  const part = (id, title) => lessonPart({ id: id, title: title || TEACH_TITLES[id] });
+  /* a Korean line written by code: shown with digits, said in words */
+  const sayLine = (p, shown, pause, fields) => {
+    let say = speakClean(shown, false);
+    /* a meaning interpolated from the log may hold a Latin word: never to the Korean voice */
+    if (LATIN_CH.test(say)){ shown = pick(TEACH_POOL.safe); say = speakClean(shown, false); }
+    if (!say) return;
+    const g = p.row("say", Object.assign({ ko: shown, who: "ko" }, fields || {}));
+    p.seg(g, "ko", /[.?!]$/.test(say) ? say : say + ".", pause == null ? TP.line : pause, { by: "code" });
+    st.lastKo = say;
+  };
+  let lastEs = "";
+  const turn = (p, t, fields) => {
+    if (t.who === "es"){
+      const g = p.row("pair", Object.assign({ es: t.shown, who: "es" }, fields || {}));
+      p.seg(g, "es", t.say, t.pause === "repeat" ? gap(t.say) : TP.es);
+      lastEs = t.say;
+      return;
+    }
+    if (t.safe){ sayLine(p, pick(TEACH_POOL.safe), TP.line); return; }
+    if (t.say === st.lastKo) return;          // the same line twice in a row says nothing new
+    const g = p.row("say", Object.assign({ ko: t.shown, who: "ko" }, fields || {}));
+    p.seg(g, "ko", t.say, t.pause === "repeat" ? gap(lastEs) : TP.line);
+    st.lastKo = t.say;
+  };
+  const turns = (p, list) => { for (const t of list) turn(p, t); };
+  /* a cue before a pause to repeat in: the AI's line unless it repeats the last cue */
+  const cue = (p, t, pool, es) => {
+    const say = t && t.say !== st.lastCue ? t.say : "";
+    let shown = say ? t.shown : pick(pool);
+    for (let k = 0; !say && k < pool.length && speakClean(shown, false) === st.lastCue; k++) shown = pick(pool);
+    const s = say || speakClean(shown, false);
+    const g = p.row("say", { ko: shown, who: "ko", cr: CR_REPEAT });
+    p.seg(g, "ko", /[.?!]$/.test(s) ? s : s + ".", gap(es), say ? undefined : { by: "code" });
+    st.lastCue = s; st.lastKo = s;
+  };
+  /* the native speaker's model: normal, then slow */
+  const model = (p, es, say, ko, fields, slow) => {
+    const g = p.row("pair", Object.assign({ es: es, ko: ko, who: "es" }, fields || {}));
+    p.seg(g, "es", say, slow ? TP.model : TP.es);
+    if (slow) p.seg(g, "es", say, TP.slow, { rate: SLOW_RATE });
+    lastEs = say;
+  };
+  const badgeOf = (x) => (x.source === "list" ? "단어 목록에서" : x.day && x.day !== ctx.iso ? isoLabel(x.day) + " 대화" : undefined);
+  /* a usage sentence: lead, the sentence, why, then the learner says it whole */
+  const useBlock = (p, x) => {
+    const u = x.use;
+    if (realKo(u.lead)) turns(p, u.lead);
+    else sayLine(p, pick(TEACH_POOL.useLead, koPlain(u.ko)));
+    model(p, u.es, u.say, u.ko, {}, level >= 1);
+    if (level >= 3) cue(p, null, TEACH_POOL.repeat, u.say);
+    for (const pt of x.why) turns(p, pt.turns);
+    cue(p, x.wholeCue, TEACH_POOL.whole, u.say);
+    model(p, u.es, u.say, u.ko, { badge: "다시" }, false);
+    if (level >= 2){
+      sayLine(p, pick(TEACH_POOL.again));
+      model(p, u.es, u.say, u.ko, {}, false);
+      cue(p, null, TEACH_POOL.repeat, u.say);
+    }
+  };
+
+  const parts = [];
+  /* 1. opening: the date, then today's theme */
+  const op = part("open");
+  sayLine(op, pick(TEACH_POOL.open, ctx.dateLabel));
+  if (c.opening) turn(op, c.opening);
+  else sayLine(op, pick(TEACH_POOL.theme));
+  parts.push(op);
+
+  /* 2. the recap: the question, two seconds, a tick, the answer */
+  if (ctx.recap && ctx.recap.items.length){
+    const rp = part("recap", ctx.recap.yesterday ? "어제 복습" : "지난 수업 복습");
+    sayLine(rp, pick(TEACH_POOL.recapLead));
+    for (const it of ctx.recap.items){
+      const g = rp.row("pair", { es: it.show || it.es, ko: it.ko, quiz: true, who: "es", badge: "복습" });
+      const q = pick(TEACH_POOL.recapAsk, it.koSay);
+      rp.seg(g, "ko", speakClean(q, false).replace(/([^.?!])$/, "$1?"), TP.think, { by: "code" });
+      rp.seg(g, "es", it.esSay, TP.answer, { cue: "tick", by: "prev" });
+    }
+    sayLine(rp, pick(TEACH_POOL.recapEnd));
+    parts.push(rp);
+  }
+
+  /* 3. words: meaning, model normal and slow, repeat, a usage sentence with its reasons */
+  if (c.words.length){
+    const wp = part("words");
+    c.words.forEach((w) => {
+      if (realKo(w.intro)) turns(wp, w.intro);
+      else sayLine(wp, pick(TEACH_POOL.wordIntro, koPlain(w.ko)));
+      model(wp, w.es, speakClean(w.es, true), w.ko, { badge: badgeOf(w), rv: "expr" }, true);
+      cue(wp, w.repeatCue, TEACH_POOL.repeat, speakClean(w.es, true));
+      /* level 2: the word once more, and once more to say */
+      if (level >= 2){
+        sayLine(wp, pick(TEACH_POOL.again));
+        model(wp, w.es, speakClean(w.es, true), w.ko, {}, false);
+        cue(wp, null, TEACH_POOL.repeat, speakClean(w.es, true));
+      }
+      if (w.use) useBlock(wp, w);
+      wp.teach("v", w.es);
+      if (w.source === "list") wp.newUsed.push({ es: w.es, ko: w.ko });
+    });
+    parts.push(wp);
+  }
+
+  /* 4. idioms: literal, real meaning, model, repeat, a usage sentence */
+  if (c.idioms.length){
+    const ip = part("idiom");
+    c.idioms.forEach((x) => {
+      turns(ip, x.literal);
+      if (realKo(x.meaning)) turns(ip, x.meaning);
+      else sayLine(ip, pick(TEACH_POOL.idiomIntro, koPlain(x.ko)));
+      model(ip, x.es, speakClean(x.es, true), x.ko, { badge: badgeOf(x), rv: "idiom" }, true);
+      cue(ip, x.repeatCue, TEACH_POOL.repeat, speakClean(x.es, true));
+      if (x.use) useBlock(ip, x);
+      ip.teach("i", x.es);
+    });
+    parts.push(ip);
+  }
+
+  /* 5. the user's own sentences: normal and slow, the reasons, a one-word variation */
+  if (c.sents.length){
+    const sp = part("sent");
+    const words = new Set(c.words.map((w) => foldEs(w.es)));
+    c.sents.forEach((s) => {
+      if (realKo(s.intro)) turns(sp, s.intro);
+      else sayLine(sp, pick(TEACH_POOL.sentIntro, koPlain(s.ko)));
+      model(sp, s.es, s.say, s.ko, { badge: badgeOf(s), rv: "sent" }, true);
+      if (level >= 1) cue(sp, null, TEACH_POOL.repeat, s.say);
+      for (const pt of s.why) turns(sp, pt.turns);
+      const v = s.variation && words.has(foldEs(s.variation.word)) ? s.variation : null;
+      if (v){
+        if (realKo(v.lead)) turns(sp, v.lead);
+        else sayLine(sp, pick(TEACH_POOL.varLead));
+        model(sp, v.es, v.say, v.ko, { badge: "바꿔 말하기" }, false);
+        cue(sp, s.repeatCue, TEACH_POOL.repeat, v.say);
+      } else {
+        cue(sp, s.repeatCue, TEACH_POOL.whole, s.say);
+        model(sp, s.es, s.say, s.ko, { badge: "다시" }, false);
+      }
+      if (level >= 2){
+        sayLine(sp, pick(TEACH_POOL.again));
+        model(sp, s.es, s.say, s.ko, {}, false);
+        cue(sp, null, TEACH_POOL.whole, s.say);
+      }
+      sp.teach("s", s.es);
+    });
+    parts.push(sp);
+  }
+
+  /* 6. closing: by level, today's items recalled (the meaning, a gap, a tick,
+     the answer), then the one sentence to take away and goodbye */
+  const cp = part("close");
+  const recall = (list, think, lead) => {
+    if (!list.length) return;
+    sayLine(cp, pick(lead));
+    for (const x of list){
+      const koSay = koPlain(x.ko), esSay = x.say || speakClean(x.es, true);
+      if (!koSay || LATIN_CH.test(koSay) || !esSay) continue;
+      const g = cp.row("pair", { es: x.es, ko: x.ko, quiz: true, who: "es", badge: "떠올리기" });
+      cp.seg(g, "ko", speakClean(pick(TEACH_POOL.recapAsk, koSay), false).replace(/([^.?!])$/, "$1?"), think, { by: "code" });
+      cp.seg(g, "es", esSay, gap(esSay), { cue: "tick" });
+    }
+  };
+  if (level >= 4) recall(c.words.concat(c.idioms), TP.think, TEACH_POOL.recallWords);
+  if (level >= 5) recall(c.sents, TP.think + 1, TEACH_POOL.recallSents);
+  /* level 6: the whole of it once more, backwards — spaced a few minutes from the first round */
+  if (level >= 6) recall(c.sents.concat(c.idioms, c.words).reverse(), TP.think, TEACH_POOL.recallAgain);
+  const tk = c.takeaway;
+  if (tk){
+    if (realKo(tk.lead)) turns(cp, tk.lead);
+    else sayLine(cp, pick(TEACH_POOL.take));
+    model(cp, tk.es, tk.say, tk.ko, {}, true);
+    cue(cp, null, TEACH_POOL.repeat, tk.say);
+  }
+  if (c.goodbye) turn(cp, c.goodbye);
+  else sayLine(cp, pick(TEACH_POOL.bye));
+  parts.push(cp);
+  return parts;
+}
+
+/* drop `k` items, last word first, so an over-long reply still fits */
+function teachTrim(c, k){
+  const o = Object.assign({}, c, { words: c.words.slice(), idioms: c.idioms.slice(), sents: c.sents.slice() });
+  const order = ["words", "sents", "words", "idioms", "sents", "words"];
+  for (let i = 0; i < k && i < order.length; i++) if (o[order[i]].length > 1) o[order[i]].pop();
+  return o;
+}
+
+/* The lesson record. `prev` is the saved lesson before this one (the recap);
+   `plan` is teachPlan's. The fitting keeps every item when it can: it tries
+   the repetition levels and pause scales first, and drops an item only when
+   even the shortest fitting is over the range. */
+function teachBuild(content, when, prev, plan, minutes){
+  const min = Number(minutes == null ? lessonMinutes() : minutes) === 20 ? 20 : 10;
+  const size = teachSize(min);
+  const iso = studyDate(when);
+  const ctx = { iso: iso, dn: dayNum(iso), dateLabel: isoLabel(iso), recap: teachRecap(prev, iso, size.recap) };
+  let best = null;
+  for (let drop = 0; drop <= 4; drop++){
+    if (best && best.inRange) break;
+    const cc = drop ? teachTrim(content, drop) : content;
+    for (const level of [0, 1, 2, 3, 4, 5, 6]){
+      for (const scale of TEACH_SCALES){
+        const parts = teachParts(cc, ctx, level, scale);
+        const ms = partsMs(parts) + (parts.length - 1) * Q.section * 1000;
+        const inRange = ms >= size.loMs && ms <= size.hiMs;
+        /* in range beats out of range; then nearest the target, with fewer extras and drops */
+        const cost = Math.abs(ms - size.targetMs) + level * 4000 + Math.abs(scale - 1) * 15000 + drop * 30000;
+        if (!best || (inRange && !best.inRange) || (inRange === best.inRange && cost < best.cost))
+          best = { cost: cost, parts: parts, estMs: ms, inRange: inRange, level: level, scale: scale, drop: drop };
+      }
+    }
+  }
+  const joined = partsJoin(best.parts);
+  const taught = [], newUsed = [];
+  for (const p of best.parts){ taught.push(...p.taught); newUsed.push(...p.newUsed); }
+  const titles = {};
+  for (const p of best.parts) titles[p.part.id] = p.part.title;
+  const n = (t) => taught.filter((x) => x.t === t).length;
+  const learnedBefore = newWordsCount();
+  return {
+    fmt: TEACH_FMT, minutes: min, date: iso, dateLabel: ctx.dateLabel, parts: titles,
+    counts: Object.assign({ words: n("v"), idioms: n("i"), sentences: n("s") },
+                          ctx.recap ? { review: ctx.recap.items.length } : {},
+                          newUsed.length ? { newWords: newUsed.length, learned: learnedBefore + newUsed.length } : {}),
+    reviewOf: ctx.recap ? ctx.recap.date : "",
+    fit: { level: best.level, scale: best.scale, drop: best.drop, estMs: Math.round(best.estMs) },
+    diag: content.diag || {},
+    segments: joined.segs, rows: joined.rows,
+    /* only what was actually spoken counts as taught; the grammar step is not touched */
+    curriculum: { iso: iso, newWords: newUsed, grammar: null, taught: taught }
+  };
 }
 
 /* ---------------- PCM ---------------- */
@@ -2800,9 +3643,11 @@ function rowHtml(r, i, p){
      with it — both for the eye only, never spoken */
   const cr = r.cr ? "<span" + cls("cr") + ">" + esc(r.cr) + "</span>" : "";
   const gest = r.gesture ? "<div" + cls("gest") + ">✋ " + esc(r.gesture) + "</div>" : "";
+  /* a teacher lesson marks who speaks: 🇰🇷 the teacher, 🇲🇽 the native speaker */
+  const flag = r.who === "ko" ? "🇰🇷 " : r.who === "es" ? "🇲🇽 " : "";
   let inner;
   if (r.kind === "pair" || r.kind === "slow" || r.kind === "full"){
-    inner = "<div" + cls("es") + ">" + from + esc(r.es || "") + badge + cr + "</div>" +
+    inner = "<div" + cls("es") + ">" + flag + from + esc(r.es || "") + badge + cr + "</div>" +
             (r.ko ? "<div" + cls("ko") + ">" + esc(r.ko) + "</div>" : "") + gest;
   } else if (r.kind === "note"){
     inner = "<div" + cls("note") + ">" + esc(r.ko || "") + "</div>";
@@ -2817,7 +3662,7 @@ function rowHtml(r, i, p){
     inner = (r.ko ? "<div" + cls("cap") + ">" + esc(r.ko) + "</div>" : "") +
             "<table" + cls("tbl") + ">" + t + "</table>";
   } else {
-    inner = "<div" + cls("say") + ">" + from + esc(r.ko || "") + badge + cr + "</div>" + gest;
+    inner = "<div" + cls("say") + ">" + flag + from + esc(r.ko || "") + badge + cr + "</div>" + gest;
   }
   return '<button class="' + p + "row " + r.kind + (r.quiz ? " quiz" : "") + '" data-i="' + i +
     '" type="button">' + inner + "</button>";
@@ -3314,7 +4159,7 @@ function askLessonJson(){
   for (const r of l.rows){
     /* the review is 1교시 and 4교시 again, and lead/intro/outro lines are narration — neither
        tells the model anything it does not already have */
-    if (r.sectionId === "review" || r.sectionId === "intro" || r.sectionId === "outro") continue;
+    if (r.sectionId === "review" || r.sectionId === "intro" || r.sectionId === "outro" || r.sectionId === "recap") continue;
     if (r.kind === "lead") continue;
     const es = r.es || "", ko = r.ko || "";
     const table = Array.isArray(r.table)
@@ -3939,24 +4784,26 @@ async function makeLessonRun(rows){
     showError("");
     lessonMessage("대본을 쓰는 중…", rows.length
       ? "오늘 대화 " + rows.length + "건을 수업으로 엮고 있습니다."
-      : "오늘은 대화 기록이 없어, 새 단어와 문법으로 수업을 엮고 있습니다.");
+      : "오늘은 대화 기록이 없어, 지난 대화와 단어 목록으로 수업을 엮고 있습니다.");
     $("lFoot").innerHTML = '<button class="mini" id="lCancel" type="button">그만두기</button>';
     $("lCancel").onclick = () => { lessonCancelled = true; cancelTts(); lessonBusySub("그만두는 중…"); };
     setStatus("수업 대본을 만드는 중…");
 
-    /* the day's course — new words, grammar step, lo·le·se lines — is read
-       first, because the one script call has to explain it */
+    /* what may be taught today — today's lines, older untaught days when
+       today is thin, the word list last — is read first, because the one
+       script call has to choose from it */
     const now = new Date();
-    const cur = curriculumPlan(rows.map((e) => spanishOf(e)), studyDate(now));
     /* read once, so the script asked for and the lesson built have one length */
     const minutes = lessonMinutes();
-    const content = await lessonWriteScript(rows, cur, minutes);
+    const plan = teachPlan(rows, typeof loadLog === "function" ? loadLog() : rows, studyDate(now), minutes);
+    const content = await lessonWriteScript(teachPrompt(), teachBody(plan),
+                                            (raw) => teachNormalise(raw, plan));
     if (lessonCancelled) throw new Error("__cancelled__");
 
-    /* 0교시 is read out of the last saved lesson; a storage error only costs the review */
+    /* the recap is read out of the last saved lesson; a storage error only costs the recap */
     const prev = await lessonPrevFor(studyDate(now)).catch(() => null);
     if (lessonCancelled) throw new Error("__cancelled__");
-    const lesson = lessonBuild(content, now, prev, cur, minutes);
+    const lesson = teachBuild(content, now, prev, plan, minutes);
     let blob = null, fellBack = "", fellErr = null;
 
     if (lset.engine === "cloud" && lset.ttsKey){
@@ -4530,6 +5377,7 @@ function exportHtml(lesson, b64){
       if (r.cr) o.cr = r.cr;
       if (r.role) o.role = r.role;
       if (r.gesture) o.gesture = r.gesture;
+      if (r.who) o.who = r.who;
       return o;
     }),
     segments: lesson.segments.map((s) => ({
